@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/emil/.codex/**)",
+      "Read(//Users/emil/.gemini/**)",
+      "Bash(uv run *)",
+      "Bash(rm -rf data/lake/_pytest_range_http ../data/lake/_pytest_range_http)",
+      "Read(//Users/emil/scratch/data/**)",
+      "Bash(lsof -nP -iTCP:5001 -sTCP:LISTEN)",
+      "Bash(docker compose *)",
+      "Bash(curl -si \"http://localhost:5001/wave?experiment=campaign-2026a&shot=999&stage=mirnov&wave=mirnov/probe_01&data_version=a1b2c3d&x_min=250&x_max=251\")",
+      "Bash(curl -si \"http://localhost:8080/range-proxy/lake/local_demo/campaign-2026a/999/mirnov/mirnov_probe_01__a1b2c3d__35e0b521.parquet?r=bytes=7392887-7538914\" -o /tmp/rg.bin)",
+      "Bash(curl -sI \"http://localhost:8080/range-proxy/lake/local_demo/campaign-2026a/999/mirnov/mirnov_probe_01__a1b2c3d__35e0b521.parquet?r=bytes=7392887-7538914\")",
+      "Bash(curl -Li \"http://localhost:5001/wave?experiment=campaign-2026a&shot=999&stage=mirnov&wave=mirnov/probe_01&data_version=a1b2c3d&x_min=250&x_max=251\" -o /tmp/final.bin -D /tmp/final.headers)"
+    ]
+  }
+}

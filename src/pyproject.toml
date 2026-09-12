@@ -1,0 +1,64 @@
+[project]
+name = "ducklake-poc"
+version = "0.1.0"
+description = "DuckLake wave-data POC: per-wave ingestion, compaction, and HTTP-range wave lookup via a Postgres manifest table"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.5.0",
+    "pyarrow>=17.0.0",
+    "numpy>=1.26.0",
+    "psycopg2-binary>=2.9.9",
+    "requests>=2.31.0",
+    "flask>=3.1.3",
+]
+
+[project.optional-dependencies]
+notebooks = [
+    "jupyter>=1.0.0",
+    "jupysql>=0.10.0",
+    "duckdb-engine>=0.13.0",
+    "sqlalchemy>=2.0.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.8.0",
+]
+
+[project.scripts]
+ducklake-ingest = "ducklake_poc.ingest:main"
+ducklake-compact = "ducklake_poc.compact:main"
+ducklake-manifest = "ducklake_poc.manifest:main"
+ducklake-fetch-wave = "ducklake_poc.fetch_wave:main"
+ducklake-api = "ducklake_poc.api_server:main"
+ducklake-reset = "ducklake_poc.reset:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ducklake_poc"]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.39.10",
+    "pyinstrument>=5.1.3",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.basedpyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+include = ["ducklake_poc", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires a locally reachable Postgres + nginx (see tests/conftest.py)",
+]

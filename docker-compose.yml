@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ducklake_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ducklake
+      POSTGRES_PASSWORD: ducklake
+      POSTGRES_DB: ducklake_catalog
+    ports:
+      - "5432:5432"
+    volumes:
+      # PostgreSQL 18's official image made PGDATA version-specific
+      # (/var/lib/postgresql/18/docker) and moved the declared VOLUME up
+      # to /var/lib/postgresql itself -- mounting at .../data (correct for
+      # postgres:16 and earlier) would silently miss the real data
+      # directory on 18+ and nothing would persist across restarts.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -d ducklake_catalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nginx:
+    image: nginx:alpine
+    container_name: ducklake_nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./data:/usr/share/nginx/html/data:ro
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - postgres
+
+  api:
+    build:
+      context: ./src
+    container_name: ducklake_api
+    restart: unless-stopped
+    environment:
+      PG_HOST: postgres
+      # This is what gets embedded in redirect Location headers sent back
+      # to the client -- it must be an address the CLIENT (not this
+      # container) can reach, hence the host-mapped port (8080), not an
+      # internal docker-network hostname.
+      NGINX_HOST_URL: http://localhost:8080
+    ports:
+      - "5001:5001"
+    depends_on:
+      - postgres
+      - nginx
+
+volumes:
+  pgdata:

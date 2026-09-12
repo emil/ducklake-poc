@@ -1,0 +1,17 @@
+{
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.12",
+  "venvPath": "src",
+  "venv": ".venv",
+  "include": [
+    "src/ducklake_poc",
+    "src/tests"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.venv",
+    "**/.mypy_cache",
+    "notebooks"
+  ]
+}
