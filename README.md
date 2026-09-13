@@ -126,6 +126,68 @@ redirect, not `X-Accel-Redirect`), so byte ranges are effectively guessable/publ
 — acceptable for this POC's non-sensitive data, not for anything access-controlled
 without adding e.g. a signed query string.
 
+### curl examples
+
+All examples assume `docker compose up -d` (nginx on `:8080`, `ducklake-api` on
+`:5001`) and a wave already ingested at `experiment=campaign-2026a`, `shot=1`,
+`stage=mirnov`, `wave=mirnov/probe_03`, `data_version=a1b2c3d`.
+
+**1. End to end through the API** (`-L` follows the 302 into nginx and prints the
+raw row-group bytes — redirect it to a file rather than a terminal):
+
+```bash
+curl -L "http://localhost:5001/wave?experiment=campaign-2026a&shot=1&stage=mirnov&wave=mirnov/probe_03&data_version=a1b2c3d&x_min=250&x_max=251" \
+  -o chunk.bin
+```
+
+**2. Just the redirect**, without following it — useful for seeing the computed
+byte range and the `X-Row-Group-*` headers before fetching anything:
+
+```bash
+curl -i "http://localhost:5001/wave?experiment=campaign-2026a&shot=1&stage=mirnov&wave=mirnov/probe_03&data_version=a1b2c3d&x_min=250&x_max=251"
+# HTTP/1.1 302 FOUND
+# Location: http://localhost:8080/range-proxy/lake/campaign-2026a/1/mirnov/mirnov_probe_03__a1b2c3d__1a2b3c4d.parquet?r=bytes=4096-8191
+# X-Row-Group-Ids: 3
+# X-Row-Group-Rows: 65536
+# X-Row-Group-X-Range: 250.0,251.4
+```
+
+**3. Skip the API, hit `/range-proxy/` directly** with an already-known byte
+range and the clean (no `key=value`) path — this is what the API's `Location`
+header points at, and what `nginx.conf`'s rewrite rule translates to the real
+hive-partitioned path server-side:
+
+```bash
+curl -i "http://localhost:8080/range-proxy/lake/campaign-2026a/1/mirnov/mirnov_probe_03__a1b2c3d__1a2b3c4d.parquet?r=bytes=4096-8191" \
+  -o chunk.bin
+```
+
+**4. Skip the API and the range-proxy too** — a plain `Range` request straight
+against `/data/`, using the *real* on-disk hive-partition path
+(`experiment=.../shot=.../stage=...`). This is the form the manifest's rewrite
+rule expands both the clean path above and this one into; both reach the same
+bytes, and both are verified byte-for-byte identical:
+
+```bash
+curl -r 4096-8191 \
+  "http://localhost:8080/data/lake/experiment=campaign-2026a/shot=1/stage=mirnov/mirnov_probe_03__a1b2c3d__1a2b3c4d.parquet" \
+  -o chunk.bin
+```
+
+In all four cases the response body is a raw row-group fragment, not a
+standalone valid `.parquet` file (no footer) — pipe it into a parquet reader
+expecting a full file and it will fail to parse; see `fetch_wave.py`'s
+docstring for the validated-read alternative.
+
+If the query's `x_min`/`x_max` matches row groups that span multiple files, or
+that aren't contiguous within one file, the API can't express the result as a
+single byte range and instead returns `300 Multiple Choices` with a JSON body
+listing every match:
+
+```bash
+curl -s "http://localhost:5001/wave?experiment=campaign-2026a&shot=1&stage=mirnov&wave=mirnov/probe_03&data_version=a1b2c3d&x_min=0&x_max=10000" | python3 -m json.tool
+```
+
 ## Column encoding (`parquet_encoding.py`)
 
 - Dictionary encoding for `wave`/`data_version` (low cardinality, repeats a lot).
