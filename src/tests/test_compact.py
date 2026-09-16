@@ -5,9 +5,11 @@ from pathlib import Path
 
 import duckdb
 
+from ducklake_poc import compact as compact_module
 from ducklake_poc.compact import (
     _iter_wave_groups,
     _shot_stage_where_clause,
+    compact_manifest_friendly,
     stream_compact_to_files,
 )
 
@@ -316,3 +318,78 @@ def test_stream_compact_target_file_size_still_splits_between_separate_waves(
         ).fetchone()
         assert n_waves is not None
         assert n_waves[0] == 1, f"{p} should contain exactly one wave, not span two"
+
+
+# ---------------------------------------------------------------------------
+# compact_manifest_friendly -- retry-on-conflict + orphaned-file cleanup
+# (see config.retry_on_conflict; this is the concurrency-safety fix)
+# ---------------------------------------------------------------------------
+
+
+def test_compact_manifest_friendly_cleans_up_orphaned_files_on_retry(
+    tmp_path: Path, monkeypatch, fake_ducklake_connection
+) -> None:
+    """A DuckLake catalog conflict on COMMIT happens AFTER
+    stream_compact_to_files has already fully written and renamed its
+    output file(s) to disk -- those files never got registered, so a
+    blind retry (which redoes the whole read+compact+write, since the
+    underlying rows may have changed) must not leave them behind."""
+    written: list[Path] = []
+
+    def fake_stream_compact_to_files(
+        con, source_sql, lake_root, rows_per_row_group, target_file_size_bytes
+    ):
+        p = Path(lake_root) / f"attempt_{len(written)}.parquet"
+        p.write_bytes(b"not a real parquet file, just standing in for one")
+        written.append(p)
+        return [str(p)]
+
+    monkeypatch.setattr(compact_module, "stream_compact_to_files", fake_stream_compact_to_files)
+    monkeypatch.setattr(compact_module.config, "LAKE_DATA_DIR", tmp_path)
+
+    con = fake_ducklake_connection(
+        count_result=5,
+        commit_effects=[
+            duckdb.TransactionException(
+                'Transaction conflict - attempting to delete from table with index "1" - '
+                "but another transaction has inserted into it"
+            )
+        ],
+    )
+
+    paths = compact_manifest_friendly(con, shot=1, stage="mirnov")
+
+    assert len(written) == 2, "expected exactly one retry after the single conflict"
+    assert not written[0].exists(), "first (failed) attempt's file must be cleaned up"
+    assert written[1].exists(), "second (successful) attempt's file must remain"
+    assert paths == [str(written[1])]
+
+
+def test_compact_manifest_friendly_does_not_mask_the_original_error(
+    tmp_path: Path, monkeypatch, fake_ducklake_connection
+) -> None:
+    written: list[Path] = []
+
+    def fake_stream_compact_to_files(
+        con, source_sql, lake_root, rows_per_row_group, target_file_size_bytes
+    ):
+        p = Path(lake_root) / f"attempt_{len(written)}.parquet"
+        p.write_bytes(b"stand-in")
+        written.append(p)
+        return [str(p)]
+
+    monkeypatch.setattr(compact_module, "stream_compact_to_files", fake_stream_compact_to_files)
+    monkeypatch.setattr(compact_module.config, "LAKE_DATA_DIR", tmp_path)
+
+    boom = duckdb.CatalogException("some genuine, non-retryable bug")
+    con = fake_ducklake_connection(count_result=5, commit_effects=[boom])
+
+    try:
+        compact_manifest_friendly(con, shot=1, stage="mirnov")
+        raise AssertionError("expected the original CatalogException to propagate")
+    except duckdb.CatalogException as e:
+        assert "genuine, non-retryable bug" in str(e)
+
+    # the one attempt's orphaned output must still be cleaned up even
+    # though the failure wasn't retried
+    assert not written[0].exists()

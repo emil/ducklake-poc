@@ -33,6 +33,7 @@ single-wave HTTP addressability actually matters.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import uuid
 from pathlib import Path
@@ -360,48 +361,68 @@ def compact_manifest_friendly(
     ingesting incrementally, stage by stage, as data actually arrives.
     Omit `stage` only for a genuine "recompact this whole shot" sweep
     (e.g. periodic maintenance, or after `--no-compact` ingestion)."""
-    con.execute("BEGIN TRANSACTION")
-    try:
-        where_sql, params = _shot_stage_where_clause(shot, stage)
+    where_sql, params = _shot_stage_where_clause(shot, stage)
+    scope = f"shot={shot}" + (f" stage={stage}" if stage is not None else "")
 
-        count_row = con.execute(
-            f"SELECT count(*) FROM {config.TABLE_NAME} WHERE {where_sql}", params
-        ).fetchone()
-        assert count_row is not None  # SELECT count(*) always returns exactly one row
-        n_rows = count_row[0]
-        scope = f"shot={shot}" + (f" stage={stage}" if stage is not None else "")
-        if n_rows == 0:
-            con.execute("ROLLBACK")
-            print(f"{scope}: no rows to compact")
-            return []
+    def _attempt() -> list[str]:
+        con.execute("BEGIN TRANSACTION")
+        paths: list[str] = []
+        try:
+            count_row = con.execute(
+                f"SELECT count(*) FROM {config.TABLE_NAME} WHERE {where_sql}", params
+            ).fetchone()
+            assert count_row is not None  # SELECT count(*) always returns exactly one row
+            n_rows = count_row[0]
+            if n_rows == 0:
+                con.execute("ROLLBACK")
+                print(f"{scope}: no rows to compact")
+                return []
 
-        stage_filter = f"AND stage = '{stage}'" if stage is not None else ""
-        source_sql = f"""
-            SELECT * FROM {config.TABLE_NAME}
-            WHERE shot = {shot} {stage_filter}
-            ORDER BY experiment, stage, wave, data_version, x
-        """
-        paths = stream_compact_to_files(
-            con,
-            source_sql,
-            config.LAKE_DATA_DIR,
-            rows_per_row_group=rows_per_row_group,
-            target_file_size_bytes=target_file_size_bytes,
-        )
-
-        con.execute(f"DELETE FROM {config.TABLE_NAME} WHERE {where_sql}", params)
-        for path in paths:
-            con.execute(
-                f"CALL ducklake_add_data_files("
-                f"'{config.DUCKLAKE_NAME}', '{config.TABLE_NAME}', '{path}')"
+            stage_filter = f"AND stage = '{stage}'" if stage is not None else ""
+            source_sql = f"""
+                SELECT * FROM {config.TABLE_NAME}
+                WHERE shot = {shot} {stage_filter}
+                ORDER BY experiment, stage, wave, data_version, x
+            """
+            paths = stream_compact_to_files(
+                con,
+                source_sql,
+                config.LAKE_DATA_DIR,
+                rows_per_row_group=rows_per_row_group,
+                target_file_size_bytes=target_file_size_bytes,
             )
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
 
-    print(f"{scope}: rewrote {n_rows} samples into {len(paths)} file(s)")
-    return paths
+            con.execute(f"DELETE FROM {config.TABLE_NAME} WHERE {where_sql}", params)
+            for path in paths:
+                con.execute(
+                    f"CALL ducklake_add_data_files("
+                    f"'{config.DUCKLAKE_NAME}', '{config.TABLE_NAME}', '{path}')"
+                )
+            con.execute("COMMIT")
+        except Exception:
+            # A failed COMMIT (e.g. a DuckLake catalog conflict from a
+            # concurrent writer -- see config.retry_on_conflict) already
+            # aborts the transaction on its own; issuing ROLLBACK on top
+            # of that raises ITS OWN "no transaction is active" error,
+            # which would otherwise replace and hide the real one below.
+            with contextlib.suppress(duckdb.Error):
+                con.execute("ROLLBACK")
+            # stream_compact_to_files() above already fully wrote and
+            # renamed these to their final names on disk, but the
+            # transaction that would have registered them with DuckLake
+            # just failed -- they're orphaned. Clean them up now so a
+            # retry (which redoes the read+compact+write from scratch,
+            # since the underlying rows may have changed) doesn't leak a
+            # new set of abandoned files into the lake directory on every
+            # conflict.
+            for p in paths:
+                Path(p).unlink(missing_ok=True)
+            raise
+
+        print(f"{scope}: rewrote {n_rows} samples into {len(paths)} file(s)")
+        return paths
+
+    return config.retry_on_conflict(_attempt)
 
 
 def main() -> None:

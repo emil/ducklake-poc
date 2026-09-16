@@ -39,6 +39,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import time
 from pathlib import Path
@@ -53,43 +54,71 @@ from .synthetic import DEFAULT_EXPERIMENT, DIAGNOSTICS, generate_stage, wave_to_
 
 
 def ensure_table(con: duckdb.DuckDBPyConnection) -> None:
-    con.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {config.TABLE_NAME} (
-            experiment VARCHAR,
-            shot INTEGER,
-            stage VARCHAR,
-            wave VARCHAR,
-            data_version VARCHAR,
-            x DOUBLE,
-            y DOUBLE
+    """Create+configure the table on first use only. The `SET SORTED BY`/
+    `SET PARTITIONED BY` calls below are each their own schema-altering
+    DuckLake transaction -- re-issuing them (even to the same, already-
+    current value) is NOT a no-op as far as DuckLake's optimistic
+    concurrency is concerned, and reliably conflicts with any other
+    transaction concurrently committing to this table (confirmed against
+    a real DuckLake/Postgres catalog: two `ducklake-ingest` processes
+    started together both fail here almost every time). Since every
+    ingest run calls this unconditionally, checking whether the table
+    already exists first -- and returning immediately if so -- is what
+    keeps steady-state concurrent ingestion from re-triggering this
+    contention on every single call, not just avoiding an error via
+    retry_on_conflict (still needed for the one real race, at cold start,
+    when several first-ever clients all see "doesn't exist yet")."""
+
+    def _create_if_missing() -> None:
+        exists = con.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+            [config.TABLE_NAME],
+        ).fetchone()
+        assert exists is not None  # SELECT count(*) always returns exactly one row
+        if exists[0] > 0:
+            return
+
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {config.TABLE_NAME} (
+                experiment VARCHAR,
+                shot INTEGER,
+                stage VARCHAR,
+                wave VARCHAR,
+                data_version VARCHAR,
+                x DOUBLE,
+                y DOUBLE
+            )
+            """
         )
-        """
-    )
-    # Uniqueness/clustering key: (experiment, shot, stage, wave,
-    # data_version) -- scientists periodically recalibrate a diagnostic
-    # and rerun the pipeline, producing a new, independent data_version of
-    # every channel in that stage; old versions are kept, not overwritten,
-    # so the same (shot, stage, wave) can have several complete copies.
-    # x on the end keeps each (wave, data_version)'s own samples in time
-    # order, which is what makes row-group min/max on x tight enough for
-    # narrow time-window queries to prune down to a couple of row groups
-    # instead of scanning the whole wave.
-    con.execute(
-        f"ALTER TABLE {config.TABLE_NAME} SET SORTED BY "
-        f"(experiment ASC, shot ASC, stage ASC, wave ASC, data_version ASC, x ASC)"
-    )
-    # Logical (catalog-level) partitioning for pruning benefit -- and,
-    # crucially, this now also matches the PHYSICAL layout (see
-    # write_stage_files below): experiment/shot/stage are hive-partition
-    # keys encoded only in the directory path, never duplicated as
-    # physical columns inside the files themselves. That combination is
-    # what ducklake_add_data_files actually needs to register partitioned
-    # files correctly -- see the module docstring and the README's
-    # "Physical layout & partitioning" section for why an earlier version
-    # of this (partition columns ALSO present in the file's own data)
-    # failed with "invalid partition value for the table configuration".
-    con.execute(f"ALTER TABLE {config.TABLE_NAME} SET PARTITIONED BY (experiment, shot, stage)")
+        # Uniqueness/clustering key: (experiment, shot, stage, wave,
+        # data_version) -- scientists periodically recalibrate a
+        # diagnostic and rerun the pipeline, producing a new, independent
+        # data_version of every channel in that stage; old versions are
+        # kept, not overwritten, so the same (shot, stage, wave) can have
+        # several complete copies. x on the end keeps each (wave,
+        # data_version)'s own samples in time order, which is what makes
+        # row-group min/max on x tight enough for narrow time-window
+        # queries to prune down to a couple of row groups instead of
+        # scanning the whole wave.
+        con.execute(
+            f"ALTER TABLE {config.TABLE_NAME} SET SORTED BY "
+            f"(experiment ASC, shot ASC, stage ASC, wave ASC, data_version ASC, x ASC)"
+        )
+        # Logical (catalog-level) partitioning for pruning benefit -- and,
+        # crucially, this now also matches the PHYSICAL layout (see
+        # write_stage_files below): experiment/shot/stage are
+        # hive-partition keys encoded only in the directory path, never
+        # duplicated as physical columns inside the files themselves.
+        # That combination is what ducklake_add_data_files actually needs
+        # to register partitioned files correctly -- see the module
+        # docstring and the README's "Physical layout & partitioning"
+        # section for why an earlier version of this (partition columns
+        # ALSO present in the file's own data) failed with "invalid
+        # partition value for the table configuration".
+        con.execute(f"ALTER TABLE {config.TABLE_NAME} SET PARTITIONED BY (experiment, shot, stage)")
+
+    config.retry_on_conflict(_create_if_missing)
 
 
 def write_stage_files(shot: int, stage: str, experiment: str = DEFAULT_EXPERIMENT) -> list[Path]:
@@ -129,16 +158,25 @@ def register_experiment(
     if not files:
         return 0
 
-    con.execute("BEGIN TRANSACTION")
-    try:
-        con.execute(
-            f"CALL ducklake_add_data_files('{config.DUCKLAKE_NAME}', '{config.TABLE_NAME}', ?)",
-            [files],
-        )
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    def _register() -> None:
+        con.execute("BEGIN TRANSACTION")
+        try:
+            con.execute(
+                f"CALL ducklake_add_data_files('{config.DUCKLAKE_NAME}', '{config.TABLE_NAME}', ?)",
+                [files],
+            )
+            con.execute("COMMIT")
+        except Exception:
+            # A failed COMMIT (e.g. a DuckLake catalog conflict from a
+            # concurrent writer -- see config.retry_on_conflict) already
+            # aborts the transaction on its own; issuing ROLLBACK on top
+            # of that raises ITS OWN "no transaction is active" error,
+            # which would otherwise replace and hide the real one below.
+            with contextlib.suppress(duckdb.Error):
+                con.execute("ROLLBACK")
+            raise
+
+    config.retry_on_conflict(_register)
     return len(files)
 
 
