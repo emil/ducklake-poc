@@ -131,10 +131,11 @@ def stream_compact_to_files(
     lake_root,
     rows_per_row_group: int = 20_000,
     target_file_size_bytes: int = 8 * 1024 * 1024,
+    source_params: list[object] | None = None,
 ) -> list[str]:
-    """Stream `source_sql` (must be sorted by (experiment, shot, stage,
-    wave, data_version, x)) out to one or more Parquet files with
-    controlled row-group AND file boundaries:
+    """Stream `source_sql` (bound with `source_params`; must be sorted by
+    (experiment, shot, stage, wave, data_version, x)) out to one or more
+    Parquet files with controlled row-group AND file boundaries:
 
       - A (wave, data_version) whose row count fits within
         `rows_per_row_group` may be packed together with adjacent small
@@ -184,7 +185,9 @@ def stream_compact_to_files(
     content-describing name when closed.
     """
     lake_root = Path(lake_root)
-    reader = con.execute(source_sql).to_arrow_reader(max(rows_per_row_group, 100_000))
+    reader = con.execute(source_sql, source_params or []).to_arrow_reader(
+        max(rows_per_row_group, 100_000)
+    )
 
     written_paths: list[str] = []
     writer: pq.ParquetWriter | None = None
@@ -328,15 +331,34 @@ def stream_compact_to_files(
     return written_paths
 
 
-def _shot_stage_where_clause(shot: int, stage: str | None) -> tuple[str, list[object]]:
+def _shot_stage_where_clause(
+    shot: int,
+    stage: str | None,
+    experiment: str | None = None,
+    data_version: str | None = None,
+) -> tuple[str, list[object]]:
     """The WHERE clause (and matching params) scoping compaction to a
-    shot, optionally narrowed to one stage. Pulled out as a pure function
-    so the scoping logic itself -- the actual fix for "ingesting one
-    stage shouldn't re-touch another, already-compacted stage's data" --
-    can be unit tested directly, without a live DuckLake attach."""
-    if stage is not None:
-        return "shot = ? AND stage = ?", [shot, stage]
-    return "shot = ?", [shot]
+    shot, optionally narrowed to one stage -- and further to one
+    (experiment, data_version). Pulled out as a pure function so the
+    scoping logic itself -- the actual fix for "ingesting one stage
+    shouldn't re-touch another, already-compacted stage's data" -- can be
+    unit tested directly, without a live DuckLake attach.
+
+    The experiment/data_version narrowing is for `ducklake-compact
+    --data-version`: rebuilding exactly one version's files by hand. (The
+    queue path, ingest_worker.py, never compacts inside DuckLake at all --
+    producers compact each version before enqueueing it.)"""
+    clauses = ["shot = ?"]
+    params: list[object] = [shot]
+    for column, value in (
+        ("stage", stage),
+        ("experiment", experiment),
+        ("data_version", data_version),
+    ):
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    return " AND ".join(clauses), params
 
 
 def compact_manifest_friendly(
@@ -345,9 +367,12 @@ def compact_manifest_friendly(
     rows_per_row_group: int = 20_000,
     target_file_size_bytes: int = 8 * 1024 * 1024,
     stage: str | None = None,
+    experiment: str | None = None,
+    data_version: str | None = None,
 ) -> list[str]:
     """Rewrite per-sample rows for one shot (optionally scoped to just one
-    stage) into one or more new files, sorted by (experiment, stage, wave,
+    stage, and further to one experiment/data_version -- see
+    _shot_stage_where_clause) into one or more new files, sorted by (experiment, stage, wave,
     data_version, x) so wave-identity, stage/data_version isolation, and
     x-range pruning all work well, then swap them into DuckLake inside a
     single transaction.
@@ -361,8 +386,17 @@ def compact_manifest_friendly(
     ingesting incrementally, stage by stage, as data actually arrives.
     Omit `stage` only for a genuine "recompact this whole shot" sweep
     (e.g. periodic maintenance, or after `--no-compact` ingestion)."""
-    where_sql, params = _shot_stage_where_clause(shot, stage)
-    scope = f"shot={shot}" + (f" stage={stage}" if stage is not None else "")
+    where_sql, params = _shot_stage_where_clause(shot, stage, experiment, data_version)
+    scope = " ".join(
+        f"{k}={v}"
+        for k, v in (
+            ("experiment", experiment),
+            ("shot", shot),
+            ("stage", stage),
+            ("data_version", data_version),
+        )
+        if v is not None
+    )
 
     def _attempt() -> list[str]:
         con.execute("BEGIN TRANSACTION")
@@ -378,10 +412,9 @@ def compact_manifest_friendly(
                 print(f"{scope}: no rows to compact")
                 return []
 
-            stage_filter = f"AND stage = '{stage}'" if stage is not None else ""
             source_sql = f"""
                 SELECT * FROM {config.TABLE_NAME}
-                WHERE shot = {shot} {stage_filter}
+                WHERE {where_sql}
                 ORDER BY experiment, stage, wave, data_version, x
             """
             paths = stream_compact_to_files(
@@ -390,6 +423,7 @@ def compact_manifest_friendly(
                 config.LAKE_DATA_DIR,
                 rows_per_row_group=rows_per_row_group,
                 target_file_size_bytes=target_file_size_bytes,
+                source_params=params,
             )
 
             con.execute(f"DELETE FROM {config.TABLE_NAME} WHERE {where_sql}", params)
@@ -450,6 +484,15 @@ def main() -> None:
         "compacting a whole shot re-touches every other already-compacted stage's data "
         "too, every time). Omit only for a genuine whole-shot recompaction sweep.",
     )
+    parser.add_argument(
+        "--experiment", default=None, help="for --strategy manifest: narrow to one experiment"
+    )
+    parser.add_argument(
+        "--data-version",
+        default=None,
+        help="for --strategy manifest: narrow to one data_version (rebuild just that "
+        "version's files)",
+    )
     args = parser.parse_args()
 
     con = config.get_connection()
@@ -465,6 +508,8 @@ def main() -> None:
             args.rows_per_row_group,
             args.target_file_size_bytes,
             stage=args.stage,
+            experiment=args.experiment,
+            data_version=args.data_version,
         )
 
 

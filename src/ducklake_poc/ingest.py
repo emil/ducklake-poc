@@ -34,6 +34,17 @@ Usage:
     python -m ducklake_poc.ingest --shot 1                    # every diagnostic group
     python -m ducklake_poc.ingest --shots 3                   # shots 1..3, every group
     python -m ducklake_poc.ingest --shot 1 --no-compact        # raw files only, no compact/manifest
+    python -m ducklake_poc.ingest --shot 1 --enqueue           # write + enqueue for ingest_worker
+
+--enqueue is the queue-driven path (see ingest_queue.py): this process
+compacts each (experiment, shot, stage, data_version) LOCALLY, with plain
+DuckDB (compact_stage_locally), straight into its final files under
+data/lake/, then enqueues them -- one queue row per version. It never
+opens a DuckLake connection; the single `ducklake-ingest-worker` only
+registers the already-final files and indexes them into wave_manifest.
+Since a (stage, data_version) is ingested exactly once, those files are
+never rewritten afterwards. That's what lets many producers run at once
+without contending on the DuckLake catalog.
 """
 
 from __future__ import annotations
@@ -41,14 +52,17 @@ from __future__ import annotations
 import argparse
 import contextlib
 import glob
+import tempfile
 import time
 from pathlib import Path
 
 import duckdb
+import psycopg2
 
 from . import config
-from .compact import compact_manifest_friendly
-from .manifest import refresh_manifest_for_file
+from . import ingest_queue as iq
+from .compact import compact_manifest_friendly, stream_compact_to_files
+from .manifest import prune_manifest_scope, refresh_manifest_for_file
 from .parquet_encoding import open_parquet_writer
 from .synthetic import DEFAULT_EXPERIMENT, DIAGNOSTICS, generate_stage, wave_to_sample_table
 
@@ -121,11 +135,19 @@ def ensure_table(con: duckdb.DuckDBPyConnection) -> None:
     config.retry_on_conflict(_create_if_missing)
 
 
-def write_stage_files(shot: int, stage: str, experiment: str = DEFAULT_EXPERIMENT) -> list[Path]:
+def write_stage_files(
+    shot: int, stage: str, experiment: str = DEFAULT_EXPERIMENT, root: Path | None = None
+) -> list[Path]:
     """Write one small parquet file per (channel, data_version) that `stage`
     produced -- current production shape (one file per wave version), in
-    genuine hive-style directories (see module docstring)."""
-    out_dir = config.RAW_DATA_DIR / f"experiment={experiment}" / f"shot={shot}" / f"stage={stage}"
+    genuine hive-style directories (see module docstring) under `root`
+    (default RAW_DATA_DIR)."""
+    out_dir = (
+        (root or config.RAW_DATA_DIR)
+        / f"experiment={experiment}"
+        / f"shot={shot}"
+        / f"stage={stage}"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths = []
@@ -157,6 +179,14 @@ def register_experiment(
     files = sorted(glob.glob(glob_pattern))
     if not files:
         return 0
+    register_files(con, files)
+    return len(files)
+
+
+def register_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> None:
+    """Register `files` (absolute paths) with DuckLake in ONE transaction
+    -- all or nothing. Shared by register_experiment above (direct
+    ingest) and ingest_worker.py (queue-driven ingest)."""
 
     def _register() -> None:
         con.execute("BEGIN TRANSACTION")
@@ -177,7 +207,6 @@ def register_experiment(
             raise
 
     config.retry_on_conflict(_register)
-    return len(files)
 
 
 def compact_and_refresh_manifest(
@@ -200,14 +229,112 @@ def compact_and_refresh_manifest(
     stage's data for that shot, on every call -- wasted work that grows
     with how many times you've incrementally ingested into the same shot,
     and it would mean compaction can't complete until every stage has
-    been ingested, defeating the incremental part entirely."""
+    been ingested, defeating the incremental part entirely.
+
+    Because this path compacts INSIDE DuckLake, re-ingesting into an
+    already-compacted (shot, stage) rewrites its earlier files -- so this
+    finally prunes wave_manifest rows in the scope that still point at the
+    replaced files (see manifest.prune_manifest_scope). The queue path
+    (--enqueue) avoids rewrites altogether by compacting before
+    registration."""
     paths = compact_manifest_friendly(
         con, shot, rows_per_row_group, target_file_size_bytes, stage=stage
     )
     manifest_rows = 0
     for p in paths:
         manifest_rows += refresh_manifest_for_file(Path(p))
+    # Only after every new file is indexed, so a lookup never finds the
+    # scope empty -- at worst it briefly sees old and new copies together.
+    prune_manifest_scope([Path(p) for p in paths], shot, stage)
     return len(paths), manifest_rows
+
+
+def compact_stage_locally(
+    shot: int,
+    stage: str,
+    experiment: str,
+    rows_per_row_group: int,
+    target_file_size_bytes: int,
+) -> dict[str, list[Path]]:
+    """Producer-side compaction for --enqueue: generate `stage`'s per-wave
+    files into a throwaway staging directory, then compact each
+    data_version separately -- plain DuckDB, no DuckLake attach -- into
+    its FINAL files under LAKE_DATA_DIR, using the same
+    stream_compact_to_files as compact.py (so the same row-group/file
+    boundary guarantees hold). Returns {data_version: [final file paths]}.
+
+    One call per data_version, not per stage: the version is the unit that
+    gets enqueued and registered atomically, and never rewritten -- a later
+    recalibration rerun is a new version with its own files."""
+    with tempfile.TemporaryDirectory(prefix="ducklake-stage-") as staging:
+        staged = write_stage_files(shot, stage, experiment, root=Path(staging))
+        if not staged:
+            return {}
+        con = duckdb.connect()
+        try:
+            con.read_parquet([str(p) for p in staged], hive_partitioning=True).create_view("staged")
+            versions = [
+                r[0]
+                for r in con.execute(
+                    "SELECT DISTINCT data_version FROM staged ORDER BY 1"
+                ).fetchall()
+            ]
+            return {
+                version: [
+                    Path(p)
+                    for p in stream_compact_to_files(
+                        con,
+                        """
+                        SELECT * FROM staged WHERE data_version = ?
+                        ORDER BY experiment, stage, wave, data_version, x
+                        """,
+                        config.LAKE_DATA_DIR,
+                        rows_per_row_group=rows_per_row_group,
+                        target_file_size_bytes=target_file_size_bytes,
+                        source_params=[version],
+                    )
+                ]
+                for version in versions
+            }
+        finally:
+            con.close()
+
+
+def enqueue_shots(
+    shots: list[int],
+    stages: list[str],
+    experiment: str,
+    rows_per_row_group: int,
+    target_file_size_bytes: int,
+) -> int:
+    """--enqueue mode: for each (shot, stage), compact every data_version
+    locally into its final files, then enqueue each version as ONE queue
+    row. A version that's already queued/ingested isn't enqueued again --
+    the files just written for it are deleted instead, since nothing will
+    ever register them. Returns the number of versions newly queued."""
+    pg_conn = psycopg2.connect(**config.pg_dsn_for_psycopg2())
+    try:
+        iq.ensure_queue_table(pg_conn)
+        total = 0
+        for shot in shots:
+            for stage in stages:
+                by_version = compact_stage_locally(
+                    shot, stage, experiment, rows_per_row_group, target_file_size_bytes
+                )
+                for version, paths in by_version.items():
+                    scope = (
+                        f"experiment={experiment} shot={shot} stage={stage} data_version={version}"
+                    )
+                    if iq.enqueue_version(pg_conn, paths, experiment, shot, stage, version):
+                        total += 1
+                        print(f"  {scope}: enqueued {len(paths)} compacted file(s)")
+                    else:
+                        for p in paths:
+                            p.unlink(missing_ok=True)
+                        print(f"  {scope}: already ingested -- discarded this run's files")
+        return total
+    finally:
+        pg_conn.close()
 
 
 def main() -> None:
@@ -239,13 +366,37 @@ def main() -> None:
         default=8 * 1024 * 1024,
         help="passed through to compaction -- roll to a new file past this size",
     )
+    parser.add_argument(
+        "--enqueue",
+        action="store_true",
+        help="compact each data_version locally into its final files and enqueue them for "
+        "ducklake-ingest-worker, instead of registering/compacting in this process",
+    )
     args = parser.parse_args()
-
-    con = config.get_connection()
-    ensure_table(con)
+    if args.enqueue and args.no_compact:
+        parser.error("--enqueue always compacts before enqueueing; drop --no-compact")
 
     shots = list(range(1, args.shots + 1)) if args.shots > 0 else [args.shot]
     stages = [args.stage] if args.stage else sorted(DIAGNOSTICS)
+
+    if args.enqueue:
+        t0 = time.time()
+        n = enqueue_shots(
+            shots,
+            stages,
+            args.experiment,
+            args.rows_per_row_group,
+            args.target_file_size_bytes,
+        )
+        print(
+            f"\nEnqueued {n} data_version(s) across {len(shots)} shot(s) x {len(stages)} "
+            f"stage(s) in {time.time() - t0:.1f}s -- run `ducklake-ingest-worker` "
+            "to register them"
+        )
+        return
+
+    con = config.get_connection()
+    ensure_table(con)
 
     total_files = 0
     total_compacted_files = 0

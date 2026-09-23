@@ -29,6 +29,7 @@ ducklake-manifest = "ducklake_poc.manifest:main"
 ducklake-fetch-wave = "ducklake_poc.fetch_wave:main"
 ducklake-api = "ducklake_poc.api_server:main"
 ducklake-reset = "ducklake_poc.reset:main"
+ducklake-ingest-worker = "ducklake_poc.ingest_worker:main"
 
 [build-system]
 requires = ["hatchling"]

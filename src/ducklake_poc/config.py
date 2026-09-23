@@ -68,6 +68,21 @@ def safe_filename(wave: str) -> str:
     return _UNSAFE_FILENAME_CHARS.sub("_", wave)
 
 
+def parse_hive_partitions(path: Path) -> dict[str, str]:
+    """Extract {"experiment": ..., "shot": ..., "stage": ...} from a
+    path's `key=value` directory segments (everything except the filename
+    itself). Shared by manifest.py (compacted files, LAKE_DATA_DIR-relative)
+    and queue.py (raw files, absolute) -- experiment/shot/stage only ever
+    live in the path, never inside the files (see compact.py's
+    PHYSICAL_COLUMNS)."""
+    values: dict[str, str] = {}
+    for part in path.parts[:-1]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            values[k] = v
+    return values
+
+
 _T = TypeVar("_T")
 
 # Substrings (matched case-insensitively) of DuckLake/Postgres errors that

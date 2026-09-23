@@ -41,6 +41,16 @@ def test_shot_stage_where_clause_scoped_to_one_stage() -> None:
     assert params == [7, "mirnov"]
 
 
+def test_shot_stage_where_clause_scoped_to_one_data_version() -> None:
+    """`ducklake-compact --data-version`: rebuild exactly one version's
+    files without touching the stage's other versions."""
+    where_sql, params = _shot_stage_where_clause(
+        shot=7, stage="mirnov", experiment="campaign-2026a", data_version="a1b2c3d"
+    )
+    assert where_sql == "shot = ? AND stage = ? AND experiment = ? AND data_version = ?"
+    assert params == [7, "mirnov", "campaign-2026a", "a1b2c3d"]
+
+
 def _make_table(con: duckdb.DuckDBPyConnection, rows: list[tuple]) -> None:
     """rows: list of (experiment, shot, stage, wave, data_version, x, y)"""
     con.execute(
@@ -337,7 +347,7 @@ def test_compact_manifest_friendly_cleans_up_orphaned_files_on_retry(
     written: list[Path] = []
 
     def fake_stream_compact_to_files(
-        con, source_sql, lake_root, rows_per_row_group, target_file_size_bytes
+        con, source_sql, lake_root, rows_per_row_group, target_file_size_bytes, source_params
     ):
         p = Path(lake_root) / f"attempt_{len(written)}.parquet"
         p.write_bytes(b"not a real parquet file, just standing in for one")
@@ -371,7 +381,7 @@ def test_compact_manifest_friendly_does_not_mask_the_original_error(
     written: list[Path] = []
 
     def fake_stream_compact_to_files(
-        con, source_sql, lake_root, rows_per_row_group, target_file_size_bytes
+        con, source_sql, lake_root, rows_per_row_group, target_file_size_bytes, source_params
     ):
         p = Path(lake_root) / f"attempt_{len(written)}.parquet"
         p.write_bytes(b"stand-in")

@@ -35,6 +35,8 @@ uv run pyinstrument -m ducklake_poc.local_demo   # profile a run
 uv run ducklake-reset --yes       # drop+recreate Postgres catalog AND clear data/raw + data/lake together
 uv run python -m ducklake_poc.local_demo   # self-contained demo, no DuckLake/catalog attach needed
 uv run ducklake-ingest --shot 1 [--stage mirnov]   # write raw files + compact + refresh manifest
+uv run ducklake-ingest --shot 1 --enqueue          # compact each data_version locally + enqueue (no DuckLake access)
+uv run ducklake-ingest-worker [--once]            # single writer: register queued versions + index wave_manifest
 uv run ducklake-compact --strategy manifest --shot 1 --stage mirnov   # re-compact standalone
 uv run ducklake-manifest data/lake/experiment=.../shot=.../stage=.../<file>.parquet  # re-index one file
 uv run ducklake-fetch-wave --experiment campaign-2026a --shot 1 --stage mirnov \
@@ -72,8 +74,11 @@ import: `get_connection()` and `safe_filename()` used to live in `ingest.py` and
 
 ```
 config.py  <-- synthetic.py, parquet_encoding.py, manifest.py, compact.py, ingest.py,
-               fetch_wave.py, api_server.py, range_http_file.py, reset.py
+               fetch_wave.py, api_server.py, range_http_file.py, reset.py,
+               ingest_queue.py
 ingest.py  --> compact.py --> manifest.py   (ingest calls compact calls manifest, per (shot, stage))
+ingest.py  --> ingest_queue.py              (--enqueue: compact locally, then enqueue per version)
+ingest_worker.py --> ingest_queue.py + ingest.py (register_files) + manifest.py (index_files)
 fetch_wave.py, api_server.py --> manifest.py (read wave_manifest) + range_http_file.py (HTTP range reads)
 ```
 
@@ -113,6 +118,27 @@ fetch_wave.py, api_server.py --> manifest.py (read wave_manifest) + range_http_f
    and falls back to `300 Multiple Choices` when matches span multiple files or have a
    `row_group_id` gap — a gap means the bytes in between belong to a *different* wave's row
    group, so it's a correctness guard, not just an optimization.
+
+### Queue-driven ingest (`ingest_queue.py`, `ingest_worker.py`)
+
+The alternative to step 2's in-process register+compact, built on one invariant: a
+`(stage, data_version)` is ingested exactly once and is immutable. Producers
+(`ducklake-ingest --enqueue`) compact each version locally (`ingest.compact_stage_locally`: plain
+DuckDB + `stream_compact_to_files`) straight into final files under `data/lake/`, then enqueue
+**one row per version** (`file_paths TEXT[]`, `UNIQUE (experiment, shot, stage, data_version)`).
+A single `ducklake-ingest-worker` (Postgres advisory lock; extra instances are hot standbys)
+registers each version's files in one DuckLake transaction, then inserts their `wave_manifest`
+rows and marks the version completed in one Postgres transaction. There is no compaction and
+no manifest refresh on this path, since files are never rewritten. Key invariants, explained in
+full in the README's "Queue-driven ingest" section:
+- The DuckLake commit and the queue update can't be one transaction (DuckLake commits through its
+  own Postgres session). Before registering, the worker checks which versions' files are already
+  *active* in `ducklake_data_file`. That check is what keeps crash recovery from
+  double-registering, so don't remove it.
+- Manifest rows are written only after DuckLake registration, together with completion, so the
+  HTTP path never serves a version SQL can't see.
+- Files wait unregistered in DuckLake's `DATA_PATH` until the worker gets to them, so
+  `ducklake_delete_orphaned_files` needs an `older_than` above the queue lag.
 
 ### Physical layout: why `experiment`/`shot`/`stage` are hive path segments, not columns
 
@@ -163,8 +189,8 @@ column, so the module asserts the two lists never overlap.
 - **Unit** (`test_synthetic.py`, `test_parquet_encoding.py`, `test_compact.py`, `test_manifest.py`,
   `test_fetch_wave.py`): DuckDB + local filesystem only, no services required.
 - **Integration** (`test_range_http_file.py`, `test_local_demo_integration.py`,
-  `test_api_server.py`, `test_reset.py`; marked `@pytest.mark.integration`): need a reachable
-  Postgres and/or nginx. `conftest.py` probes for both and `pytest.skip`s cleanly if unreachable,
+  `test_api_server.py`, `test_reset.py`, most of `test_ingest_queue.py`; marked
+  `@pytest.mark.integration`): need a reachable Postgres and/or nginx. `conftest.py` probes for both and `pytest.skip`s cleanly if unreachable,
   so `uv run pytest` passes on a machine without `docker compose up`.
 
 ## Known gaps (see README's "What's not verified" section)

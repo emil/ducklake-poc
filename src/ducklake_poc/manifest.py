@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS wave_manifest_lookup
 # One row per row group. Only wave/data_version/x are physically present
 # in the file (see PHYSICAL_COLUMNS in compact.py), so only those come
 # from parquet_metadata() -- experiment/shot/stage come from the file's
-# path instead (see _parse_hive_partitions below). compact.py guarantees
+# path instead (see config.parse_hive_partitions). compact.py guarantees
 # an entire FILE never spans two different data_versions, so
 # data_version is always single-valued here; wave_min/wave_max are equal
 # (a single channel) except where several complete small waves from the
@@ -96,18 +96,6 @@ def relative_to_lake_dir(path: Path) -> Path:
     return path.resolve().relative_to(config.LAKE_DATA_DIR.resolve())
 
 
-def _parse_hive_partitions(rel_path: Path) -> dict[str, str]:
-    """Extract {"experiment": ..., "shot": ..., "stage": ...} from a
-    LAKE_DATA_DIR-relative path's `key=value` directory segments
-    (everything except the filename itself)."""
-    values: dict[str, str] = {}
-    for part in rel_path.parts[:-1]:
-        if "=" in part:
-            k, v = part.split("=", 1)
-            values[k] = v
-    return values
-
-
 def clean_relative_path(rel_path: Path) -> str:
     """A LAKE_DATA_DIR-relative path with hive `key=value` directory
     segments stripped down to just `value` -- used to build the
@@ -129,7 +117,7 @@ def file_url_for(rel_path: Path) -> str:
 
 def build_manifest_rows(con: duckdb.DuckDBPyConnection, parquet_path: Path) -> list[tuple]:
     rel_path = relative_to_lake_dir(parquet_path)
-    partitions = _parse_hive_partitions(rel_path)
+    partitions = config.parse_hive_partitions(rel_path)
     missing = {"experiment", "shot", "stage"} - partitions.keys()
     if missing:
         raise ValueError(
@@ -206,6 +194,80 @@ def upsert_manifest_rows(pg_conn, rows: list[tuple]) -> None:
             rows,
         )
     pg_conn.commit()
+
+
+def index_files(cur, parquet_paths: list[Path]) -> int:
+    """Insert wave_manifest rows for newly registered, never-to-be-rewritten
+    files (the queue path: ingest_worker.py) using the CALLER's cursor and
+    transaction -- no commit here, so the worker can index a version and
+    mark it completed atomically. ON CONFLICT DO NOTHING rather than an
+    upsert: a file's row groups never change once written, so a row that's
+    already there (a retry after a crash) is already correct. Returns how
+    many rows were built."""
+    con = duckdb.connect()
+    try:
+        rows = [row for p in parquet_paths for row in build_manifest_rows(con, p)]
+    finally:
+        con.close()
+    if rows:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO wave_manifest
+                (experiment, shot, stage, wave_min, wave_max, data_version, x_min, x_max,
+                 file_path, file_url, row_group_id, row_group_rows, byte_start, byte_length)
+            VALUES %s
+            ON CONFLICT (file_path, row_group_id) DO NOTHING
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def prune_manifest_scope(
+    keep_paths: list[Path],
+    shot: int,
+    stage: str | None = None,
+    experiment: str | None = None,
+    data_version: str | None = None,
+) -> int:
+    """Delete wave_manifest rows inside one compaction scope (same filters
+    as compact._shot_stage_where_clause) whose file isn't one of
+    `keep_paths` -- the files that compaction just wrote. Call only after
+    that compaction has committed: every row it removes then points at a
+    file DuckLake has already ended, and leaving it would make a lookup
+    match both the old and new copies of the same rows (api_server.py
+    answers that with 300 Multiple Choices instead of a redirect).
+
+    Only the direct ingest path needs this: it compacts inside DuckLake,
+    so re-ingesting into an already-compacted (shot, stage) rewrites its
+    files. The queue path never rewrites a file (see index_files). Returns
+    how many rows were deleted."""
+    clauses = ["shot = %s"]
+    params: list[object] = [shot]
+    for column, value in (
+        ("stage", stage),
+        ("experiment", experiment),
+        ("data_version", data_version),
+    ):
+        if value is not None:
+            clauses.append(f"{column} = %s")
+            params.append(value)
+    params.append([str(relative_to_lake_dir(p)) for p in keep_paths])
+    pg_conn = psycopg2.connect(**config.pg_dsn_for_psycopg2())
+    try:
+        with pg_conn.cursor() as cur:
+            cur.execute(CREATE_MANIFEST_SQL)
+            cur.execute(
+                f"DELETE FROM wave_manifest WHERE {' AND '.join(clauses)} "
+                "AND NOT (file_path = ANY(%s))",
+                params,
+            )
+            n = cur.rowcount
+        pg_conn.commit()
+        return n
+    finally:
+        pg_conn.close()
 
 
 def refresh_manifest_for_file(parquet_path: Path) -> int:

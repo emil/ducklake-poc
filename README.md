@@ -51,6 +51,9 @@ src/ducklake_poc/
   config.py            shared paths/connection settings, safe_filename
   synthetic.py         per-sample-row generator for realistic diagnostics
   ingest.py            raw files -> batched add_data_files -> compact -> manifest
+                       (or, with --enqueue, compact locally -> ingest_queue)
+  ingest_queue.py      Postgres work queue: one row per (experiment, shot, stage, data_version)
+  ingest_worker.py     single DuckLake writer: register + index each queued version
   compact.py           wave-boundary-aware compaction (see Pipeline, below)
   manifest.py          parquet footer + hive-path -> wave_manifest
   parquet_encoding.py  shared column-encoding policy
@@ -103,6 +106,73 @@ test tiers, editor type-checking setup).
    when matches span multiple files or have a `row_group_id` gap (a gap means the
    bytes in between belong to a *different* wave's row group — a correctness
    guard, not just an optimization).
+
+## Queue-driven ingest (`--enqueue` + `ducklake-ingest-worker`)
+
+A `(stage, data_version)` is ingested exactly once and never changes. The
+queue path relies on that: producers compact each version *before* enqueueing
+it, straight into its final files, so nothing downstream ever rewrites a file,
+and every file is indexed into `wave_manifest` exactly once, never refreshed.
+The one DuckLake writer only registers finished files, so producers never
+contend on the catalog (the conflicts `config.retry_on_conflict` papers over on
+the direct path).
+
+```
+producer (ducklake-ingest --enqueue, many at once)
+  generate the stage's per-wave files into a temp staging dir
+  per data_version: stream_compact_to_files (plain DuckDB, no DuckLake)
+                    -> final files under data/lake/experiment=/shot=/stage=/
+  INSERT one queue row per version (file_paths[])
+    UNIQUE (experiment, shot, stage, data_version): already there -> no-op,
+    and the producer deletes the files it just wrote; 'failed' -> revived
+
+ducklake-ingest-worker (exactly one active: pg_try_advisory_lock; others wait as standby)
+  on lock: every 'processing' row belongs to a dead worker -> back to 'pending'
+  loop:
+    claim <= batch_size versions (UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING)
+    versions whose files DuckLake already has active -> skip straight to indexing
+    ducklake_add_data_files(all their files)  -- one DuckLake transaction
+      on failure: retry version by version, so a bad version fails alone
+    per batch, one Postgres transaction: INSERT wave_manifest rows + mark completed
+```
+
+**One row per version.** `UNIQUE (experiment, shot, stage, data_version)`
+states "ingested once" directly: a producer retry, or rerunning the same
+calibration, can never queue a version twice. Before a row is inserted, each
+file is checked to be under `LAKE_DATA_DIR` (manifest paths are relative to
+it, and nginx serves it), in the right hive directory, and to hold exactly that
+`data_version` according to its Parquet footer.
+
+**Atomic versions.** A version's files are registered in one DuckLake
+transaction, so a version becomes queryable all at once. Its manifest rows are
+inserted in the same Postgres transaction that marks it completed, so the HTTP
+fetch path never serves a version SQL can't see, and a completed version always
+has its manifest. A rerun is a new version with new files, so earlier versions'
+files and manifest rows are never touched.
+
+**Why not one transaction for everything?** `ducklake_add_data_files` runs in
+DuckDB, and DuckLake commits through its *own* Postgres session, so it can
+never be atomic with the psycopg2 session holding the queue row. The crash
+window between the two is closed by checking DuckLake's catalog
+(`ducklake_data_file`, same database) before registering: a version's files
+are either all active (skip to indexing) or none are. `ducklake_add_data_files`
+keeps the absolute path it's given (`path_is_relative = false`), even for files
+inside its own `DATA_PATH`. That was confirmed against a real catalog.
+
+Limits:
+- **Orphan cleanup:** files sit in DuckLake's `DATA_PATH` unregistered from the
+  moment a producer writes them until the worker registers them.
+  `ducklake_delete_orphaned_files` would delete them, so if it runs, give it an
+  `older_than` well above the queue's worst-case lag. A producer that crashes
+  after writing but before enqueueing leaves genuinely orphaned files, which
+  that cleanup is for.
+- **Keep the paths apart:** the direct path (`ducklake-ingest` without
+  `--enqueue`, `ducklake-compact`) compacts inside DuckLake and rewrites files.
+  Don't point it at versions the queue ingested.
+- **Tiny-file deletes:** for very small files, DuckLake records a `DELETE` as an
+  *inlined* delete and keeps the data file active. Run
+  `ducklake_rewrite_data_files` before removing such files from disk (the test
+  cleanup does).
 
 ## HTTP API
 
