@@ -184,6 +184,15 @@ interleaved doubles), ZSTD level 2 (chosen for write-side CPU cost during contin
 not maximum ratio). Dictionary encoding and `BYTE_STREAM_SPLIT` are mutually exclusive per Parquet
 column, so the module asserts the two lists never overlap.
 
+## Querying the lake
+
+Any query against `waves`, `wave_manifest`, or the fetch path (SQL files, notebooks, Python,
+ad hoc) must follow the guidelines below. They're written for the production scale target
+(~10^12 rows, ~3,000 waves/shot across ~40 stages), where unfiltered or version-mixing queries
+are either wrong or never finish.
+
+@QUERYING.md
+
 ## Test tiers
 
 - **Unit** (`test_synthetic.py`, `test_parquet_encoding.py`, `test_compact.py`, `test_manifest.py`,
