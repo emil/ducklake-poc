@@ -135,6 +135,56 @@ def ensure_table(con: duckdb.DuckDBPyConnection) -> None:
     config.retry_on_conflict(_create_if_missing)
 
 
+WAVE_AUC_FUNCTION = "wave_auc"
+
+# Table function, stored in the DuckLake catalog. Trapezoidal area under the
+# curve per wave, with the QUERYING.md rules baked in: the partition columns
+# and data_version are required arguments (so they can't be forgotten), and
+# the optional x window is a bare-column comparison so it still prunes.
+# The window defaults are +/-1e308 rather than NULL on purpose: DuckLake
+# mishandles NULL default parameters in CREATE FUNCTION
+# (https://github.com/duckdb/ducklake/issues/1116).
+_WAVE_AUC_SQL = f"""
+CREATE OR REPLACE FUNCTION {WAVE_AUC_FUNCTION}(
+    p_experiment, p_shot, p_stage, p_data_version,
+    p_x_min := -1e308, p_x_max := 1e308
+) AS TABLE
+WITH ordered AS (
+    SELECT
+        wave, x, y,
+        lead(x) OVER w AS x_next,
+        lead(y) OVER w AS y_next
+    FROM {config.TABLE_NAME}
+    WHERE experiment = p_experiment AND shot = p_shot AND stage = p_stage
+      AND data_version = p_data_version
+      AND x >= p_x_min AND x <= p_x_max
+    WINDOW w AS (PARTITION BY wave ORDER BY x)
+)
+SELECT wave, sum(0.5 * (y + y_next) * (x_next - x)) AS auc
+FROM ordered
+WHERE x_next IS NOT NULL
+GROUP BY wave
+"""
+
+
+def ensure_functions(con: duckdb.DuckDBPyConnection) -> None:
+    """Create the catalog-level SQL functions (currently `wave_auc`) if
+    missing. Like ensure_table, checks first so steady-state callers don't
+    write a new catalog snapshot (and conflict with concurrent writers) on
+    every call."""
+
+    def _create_if_missing() -> None:
+        row = con.execute(
+            "SELECT count(*) FROM duckdb_functions() WHERE function_name = ?",
+            [WAVE_AUC_FUNCTION],
+        ).fetchone()
+        assert row is not None
+        if row[0] == 0:
+            con.execute(_WAVE_AUC_SQL)
+
+    config.retry_on_conflict(_create_if_missing)
+
+
 def write_stage_files(
     shot: int, stage: str, experiment: str = DEFAULT_EXPERIMENT, root: Path | None = None
 ) -> list[Path]:
@@ -397,6 +447,7 @@ def main() -> None:
 
     con = config.get_connection()
     ensure_table(con)
+    ensure_functions(con)
 
     total_files = 0
     total_compacted_files = 0

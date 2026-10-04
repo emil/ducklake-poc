@@ -43,7 +43,7 @@ import psycopg2
 
 from . import config
 from . import ingest_queue as iq
-from .ingest import ensure_table, register_files
+from .ingest import ensure_functions, ensure_table, register_files
 from .manifest import CREATE_MANIFEST_SQL, index_files
 
 
@@ -245,6 +245,7 @@ def main() -> None:
 
     con = config.get_connection()
     ensure_table(con)
+    ensure_functions(con)
     print("ingest worker active")
 
     try:
