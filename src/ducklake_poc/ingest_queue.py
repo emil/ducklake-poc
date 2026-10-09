@@ -280,6 +280,25 @@ def active_registered_paths(pg_conn, paths: Sequence[str]) -> set[str]:
     return found
 
 
+def lookup_version(
+    pg_conn, experiment: str, shot: int, stage: str, data_version: str
+) -> tuple[str, list[str]] | None:
+    """Return (status, absolute file paths) for one queued version, or
+    None if the queue has no row for it. This reads the queue table only.
+    It does not read any Parquet file or wave_manifest row. The HTTP
+    layer uses it to find the files of a version that is not yet
+    registered in DuckLake (see lake_client.py)."""
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            f"SELECT status, file_paths FROM {QUEUE_TABLE} "
+            "WHERE experiment = %s AND shot = %s AND stage = %s AND data_version = %s",
+            (experiment, shot, stage, data_version),
+        )
+        row = cur.fetchone()
+    pg_conn.commit()
+    return None if row is None else (row[0], list(row[1]))
+
+
 def try_acquire_worker_lock(pg_conn) -> bool:
     """Session-level: held until `pg_conn` closes (or the backend dies),
     across any number of commits. Postgres releases it automatically if

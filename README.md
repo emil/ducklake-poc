@@ -258,6 +258,23 @@ listing every match:
 curl -s "http://localhost:5001/wave?experiment=campaign-2026a&shot=1&stage=mirnov&wave=mirnov/probe_03&data_version=a1b2c3d&x_min=0&x_max=10000" | python3 -m json.tool
 ```
 
+## Lake client (`lake_client.py`)
+
+`LakeClient(base_url, catalog=None)` reads the lake over HTTP. With a `catalog`, it also runs SQL.
+
+- `fetch(experiment=, shot=, stage=, data_version=, dest_dir=)` downloads the complete stage.
+  This path uses nginx only: it lists `/lake-index/<experiment>/<shot>/<stage>/`, keeps the files of
+  the `data_version`, and downloads them from `/data/lake/`. It reads no `wave_manifest` row and no
+  Parquet footer. If the directory has no file of that version, the client asks `/ingest-queue/`.
+  nginx proxies that location to the API view `/ingest_queue`, which reads the `ingest_queue` table.
+- `fetch(..., wave="mirnov/probe_03", x_min=, x_max=)` downloads one wave (or a time slice) as one
+  valid Parquet file. It uses `/api/wave`, which nginx proxies to the API.
+- `query(sql, params)` runs SQL on the `waves` table. It needs the `catalog` argument.
+  Follow `QUERYING.md`.
+
+The module docstring has examples. The nginx locations `/lake-index/`, `/ingest-queue/` and
+`/api/` are not tested against a real nginx yet. The unit tests use a fake server.
+
 ## Column encoding (`parquet_encoding.py`)
 
 - Dictionary encoding for `wave`/`data_version` (low cardinality, repeats a lot).

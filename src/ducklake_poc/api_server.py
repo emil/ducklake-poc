@@ -59,11 +59,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
+import psycopg2
 from flask import Flask, jsonify, redirect, request
 from flask.typing import ResponseReturnValue
 
-from . import config, fetch_wave
-from .manifest import clean_relative_path
+from . import config, fetch_wave, ingest_queue
+from .manifest import clean_relative_path, relative_to_lake_dir
 
 app = Flask(__name__)
 
@@ -193,6 +194,42 @@ def wave() -> ResponseReturnValue:
     resp.headers["X-Row-Group-Rows"] = str(plan.total_rows)
     resp.headers["X-Row-Group-X-Range"] = f"{plan.x_min},{plan.x_max}"
     return resp
+
+
+def _queued_version(experiment: str, shot: int, stage: str, data_version: str):
+    """Queue lookup for the /ingest_queue view. It is a separate function
+    so that tests can replace it."""
+    conn = psycopg2.connect(**config.pg_dsn_for_psycopg2())
+    try:
+        return ingest_queue.lookup_version(conn, experiment, shot, stage, data_version)
+    finally:
+        conn.close()
+
+
+@app.route("/ingest_queue")
+def ingest_queue_files() -> ResponseReturnValue:
+    """List the files of one data_version in the ingest queue. The answer
+    comes from the queue table only. No Parquet footer and no
+    wave_manifest row is read. nginx proxies /ingest-queue/ to this view.
+
+        curl "http://localhost:8080/ingest-queue/?experiment=campaign-2026a&shot=1&stage=mirnov&data_version=a1b2c3d"
+
+    Response: {"status": "pending", "files": ["campaign-2026a/1/mirnov/<file>.parquet", ...]}.
+    The file names are clean paths, relative to /data/lake/.
+    """
+    experiment = request.args.get("experiment")
+    shot = request.args.get("shot", type=int)
+    stage = request.args.get("stage")
+    data_version = request.args.get("data_version")
+    if experiment is None or shot is None or stage is None or data_version is None:
+        return jsonify(error="required query params: experiment, shot, stage, data_version"), 400
+
+    found = _queued_version(experiment, shot, stage, data_version)
+    if found is None:
+        return jsonify(error="data_version is not in the ingest queue"), 404
+    status, paths = found
+    files = [clean_relative_path(relative_to_lake_dir(Path(p))) for p in paths]
+    return jsonify(status=status, files=files)
 
 
 def main() -> None:
