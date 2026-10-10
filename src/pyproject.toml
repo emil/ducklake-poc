@@ -20,6 +20,7 @@ notebooks = [
     "sqlalchemy>=2.0.0",
     "pandas>=2.0.0",
     "matplotlib>=3.8.0",
+    "marimo>=0.9",
 ]
 
 [project.scripts]

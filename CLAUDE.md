@@ -24,6 +24,9 @@ uv sync                           # creates .venv, installs deps from uv.lock
 uv sync --dev                     # + pytest, ruff, basedpyright, pyinstrument
 uv sync --extra notebooks         # + jupyter/jupysql for notebooks/wave_exploration.ipynb
 
+uv run marimo run ../notebooks/querying_the_lake.py    # slide deck: querying + plotting (--edit to edit; present with the slides layout)
+LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" \
+    uv run marimo run ../notebooks/querying_the_lake.py  # same deck on the real catalog (default: local demo lake)
 uv run ruff check .               # lint
 uv run ruff format .              # format
 uv run basedpyright .             # type check
