@@ -1,86 +1,86 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file gives guidance to Claude Code (claude.ai/code) for work on code in this repository.
 
 ## What this is
 
-A proof-of-concept for a physics wave-data lake: DuckLake (catalog on Postgres) with
-**per-sample-row** ingestion (one row per sample, not per wave, so Parquet row groups can be
-pruned by time), compaction that gives large waves their own dedicated row groups, and a
-`wave_manifest` Postgres table that lets a plain HTTP byte-range fetch pull a narrow time-slice
-of a wave without going through DuckDB at all.
+This is a proof-of-concept for a physics wave-data lake. It uses DuckLake (catalog on Postgres)
+with **one row for each sample** (not for each wave), so that Parquet row groups can be pruned by
+time. Compaction gives large waves their own dedicated row groups. A `wave_manifest` Postgres
+table lets a plain HTTP byte-range fetch read a narrow time slice of a wave without DuckDB.
 
-The full design rationale (schema decisions, partitioning, compaction algorithm, encoding
-choices, and a "lessons learned" section documenting real bugs hit while building this) lives in
-`README.md` — read it before making non-trivial changes to `compact.py`, `manifest.py`, or the
-hive-partitioning layout; it explains *why* things are the way they are, not just what they do.
+`README.md` has the design rationale: schema, partitioning, compaction algorithm, encoding
+choices, and the queue-driven ingest. Read it before you make a non-trivial change to
+`compact.py`, `manifest.py`, or the hive-partitioning layout. It explains *why* each part is
+as it is, not only what it does.
 
 ## Commands
 
 ```bash
-docker compose up -d              # postgres:5432 + nginx:8080 (+ api, untested in dev sandboxes)
+docker compose up -d              # postgres:5432 + nginx:8080 (+ api, not tested in dev sandboxes)
 cd src
-uv sync                           # creates .venv, installs deps from uv.lock
+uv sync                           # creates .venv, installs dependencies from uv.lock
 uv sync --dev                     # + pytest, ruff, basedpyright, pyinstrument
-uv sync --extra notebooks         # + jupyter/jupysql for notebooks/wave_exploration.ipynb
+uv sync --extra notebooks         # + jupyter, jupysql, marimo (notebooks/)
 
-uv run marimo run ../notebooks/querying_the_lake.py    # slide deck: querying + plotting (--edit to edit; present with the slides layout)
+uv run marimo run ../notebooks/querying_the_lake.py    # slide deck: querying and plotting (--edit to edit)
 LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" \
     uv run marimo run ../notebooks/querying_the_lake.py  # same deck on the real catalog (default: local demo lake)
 uv run ruff check .               # lint
 uv run ruff format .              # format
 uv run basedpyright .             # type check
-uv run pytest                     # full test suite (unit + integration, integration auto-skips if services aren't up)
-uv run pytest tests/test_compact.py::test_iter_wave_groups_reassembles_a_wave_split_across_internal_batches  # single test
-uv run pytest -m "not integration"  # unit tests only, no Postgres/nginx needed
+uv run pytest                     # all tests (unit + integration; integration skips if services are down)
+uv run pytest tests/test_compact.py::test_iter_wave_groups_reassembles_a_wave_split_across_internal_batches  # one test
+uv run pytest -m "not integration"  # unit tests only, no Postgres or nginx needed
 uv run pyinstrument -m ducklake_poc.local_demo   # profile a run
 
-uv run ducklake-reset --yes       # drop+recreate Postgres catalog AND clear data/raw + data/lake together
-uv run python -m ducklake_poc.local_demo   # self-contained demo, no DuckLake/catalog attach needed
+uv run ducklake-reset --yes       # drop and recreate the Postgres catalog AND clear data/raw + data/lake
+uv run python -m ducklake_poc.local_demo   # standalone demo, no DuckLake or catalog attach needed
 uv run ducklake-ingest --shot 1 [--stage mirnov]   # write raw files + compact + refresh manifest
 uv run ducklake-ingest --shot 1 --enqueue          # compact each data_version locally + enqueue (no DuckLake access)
 uv run ducklake-ingest-worker [--once]            # single writer: register queued versions + index wave_manifest
-uv run ducklake-compact --strategy manifest --shot 1 --stage mirnov   # re-compact standalone
-uv run ducklake-manifest data/lake/experiment=.../shot=.../stage=.../<file>.parquet  # re-index one file
+uv run ducklake-compact --strategy manifest --shot 1 --stage mirnov   # compact again, standalone
+uv run ducklake-manifest data/lake/experiment=.../shot=.../stage=.../<file>.parquet  # index one file again
 uv run ducklake-fetch-wave --experiment campaign-2026a --shot 1 --stage mirnov \
     --wave mirnov/probe_03 --data-version a1b2c3d --x-min 250 --x-max 251
-uv run ducklake-api               # Flask API on :5001, redirects into nginx's range-proxy
+uv run ducklake-api               # Flask API on :5001, redirects into the nginx range-proxy
 ```
 
-Run a single pytest test with `uv run pytest tests/test_foo.py::test_name` or filter with `-k`.
+To run one pytest test, use `uv run pytest tests/test_foo.py::test_name`, or filter with `-k`.
 
-**Always reset the catalog when local `data/` files were cleared or regenerated independently**
-(e.g. between iterative test runs) — the Postgres catalog is a separate source of truth from the
-files on disk, and letting them drift produces `IO Error: Cannot open file ... No such file or
-directory` on any query touching the stale reference. `ducklake-reset --yes` resets both sides
-together atomically (and terminates lingering connections, e.g. a running `ducklake-api`, before
-dropping the database).
+**Always reset the catalog when you clear or regenerate the local `data/` files alone** (for
+example between test runs). The Postgres catalog and the files on disk are two separate sources
+of truth. If they differ, each query that uses a stale reference fails with
+`IO Error: Cannot open file ... No such file or directory`. `ducklake-reset --yes` resets both
+together. It also ends open connections (for example a running `ducklake-api`) before it drops
+the database.
 
 ## Editor type-checking setup
 
-There are **two** basedpyright configs and they must stay in sync: `src/pyproject.toml`'s
-`[tool.basedpyright]` (used by `uv run basedpyright`) and the root-level `pyrightconfig.json`
-(used by editors whose workspace root is the repo root, since a root `pyrightconfig.json`
-completely overrides any `pyproject.toml` config found elsewhere in the tree). The root config
-points `venvPath`/`venv` at `src/.venv` and excludes `notebooks/` (native `.ipynb` support
-otherwise flags JupySQL's `%%sql` magic and `get_ipython()` as errors).
+There are **two** basedpyright configs. Keep them the same:
+- `[tool.basedpyright]` in `src/pyproject.toml` (used by `uv run basedpyright`).
+- `pyrightconfig.json` in the repo root (used by editors whose workspace root is the repo root).
+  A root `pyrightconfig.json` completely overrides each `pyproject.toml` config in the tree.
+
+The root config points `venvPath` and `venv` to `src/.venv`. It excludes `notebooks/`. Without
+this, native `.ipynb` support reports the JupySQL `%%sql` magic and `get_ipython()` as errors.
 
 ## Architecture
 
 ### Module dependency shape
 
-`config.py` is the shared base (paths, DB connection, `safe_filename`) — everything else depends
-on it, and it depends on nothing else in this package. This exists specifically so `ingest.py`
-can call directly into `compact.py` (to compact immediately after ingesting) without a circular
-import: `get_connection()` and `safe_filename()` used to live in `ingest.py` and were moved to
-`config.py` for exactly this reason.
+`config.py` is the shared base (paths, DB connection, `safe_filename`). All other modules
+depend on it. It does not depend on any other module of the package. This lets `ingest.py` call
+`compact.py` directly (to compact immediately after ingest) without a circular import.
+`get_connection()` and `safe_filename()` were in `ingest.py`. They moved to `config.py` for this
+reason.
 
 ```
 config.py  <-- synthetic.py, parquet_encoding.py, manifest.py, compact.py, ingest.py,
                fetch_wave.py, api_server.py, range_http_file.py, reset.py,
                ingest_queue.py
-ingest.py  --> compact.py --> manifest.py   (ingest calls compact calls manifest, per (shot, stage))
-ingest.py  --> ingest_queue.py              (--enqueue: compact locally, then enqueue per version)
+ingest.py  --> compact.py --> manifest.py   (ingest calls compact calls manifest, for each (shot, stage))
+ingest.py  --> ingest_queue.py              (--enqueue: compact locally, then enqueue each version)
 ingest_worker.py --> ingest_queue.py + ingest.py (register_files) + manifest.py (index_files)
 fetch_wave.py, api_server.py --> manifest.py (read wave_manifest) + range_http_file.py (HTTP range reads)
 ```
@@ -88,79 +88,90 @@ fetch_wave.py, api_server.py --> manifest.py (read wave_manifest) + range_http_f
 ### The pipeline: ingest -> compact -> manifest -> fetch
 
 1. **`synthetic.py`** generates realistic per-sample rows for named tokamak diagnostics
-   (`DIAGNOSTICS`/`STAGE_PROFILE` dicts) — sample-rate profiles vary genuinely by diagnostic
-   *stage* (e.g. Mirnov at 4MHz vs. Thomson at ~1kHz pulsed), not an arbitrary "rare big wave"
-   knob. `data_version` (git-hash-style) models recalibration reruns, drawn once per `(shot,
-   stage)` and applied across the whole diagnostic group.
-2. **`ingest.py`** writes one raw Parquet file per `(wave, data_version)` to
-   `data/raw/experiment=.../shot=.../stage=.../`, registers them via a single batched
-   `ducklake_add_data_files` call per `(shot, stage)`, then — by default, per `(shot, stage)`
-   immediately after that group registers — calls into `compact.py` and `manifest.py` so each
-   diagnostic group is queryable the moment its own ingestion finishes, without waiting on other
-   stages. `--no-compact` skips this; `--stage` scopes a single call to one diagnostic group
-   (omitting it recompacts the whole shot, which is for periodic maintenance, not normal ingest).
-3. **`compact.py`** is the core invariant-enforcing piece. It re-groups the sorted row stream
-   into complete `(stage, wave, data_version)` chunks (`_iter_wave_groups`) regardless of
-   underlying batch boundaries, then:
-   - gives an oversized wave its own dedicated, contiguous row groups (never mixed with another
-     wave's rows, even partially),
-   - packs small channel-versions together only within the same `(stage, data_version)`,
-   - treats `stage` and `data_version` as hard partition boundaries at **both** the row-group and
-     the **file** level — a file's rollover happens between complete waves, never mid-wave, so a
-     single oversized wave always lands in exactly one file even if that exceeds
-     `--target-file-size-bytes` ("one wave, one file" — this is what lets the HTTP API safely
-     combine multiple row groups into one redirect).
-   Files are written under a temp name and renamed on close (`<wave-or-"multi">__<data_version>__<hash>.parquet`)
-   once it's known whether the file ended up single-wave or packed.
-4. **`manifest.py`** reads the Parquet footer directly (`parquet_metadata()`, bypassing DuckLake)
-   for row-group-level `x_min`/`x_max` and byte offsets, and parses `experiment`/`shot`/`stage`
-   from the hive-style **path** (not columns — see below) into the `wave_manifest` Postgres table.
-5. **`fetch_wave.py`** / **`api_server.py`** look up matching row groups in `wave_manifest` and
-   fetch only those bytes. `api_server.py`'s `plan_response()` (pure function, tested in
-   `test_api_server_logic.py`) combines contiguous row groups into a single redirect when safe,
-   and falls back to `300 Multiple Choices` when matches span multiple files or have a
-   `row_group_id` gap — a gap means the bytes in between belong to a *different* wave's row
-   group, so it's a correctness guard, not just an optimization.
+   (`DIAGNOSTICS` and `STAGE_PROFILE` dicts). The sample-rate profiles are different for each
+   diagnostic *stage* (for example Mirnov at 4 MHz and Thomson at about 1 kHz pulsed). They are
+   not an arbitrary "rare big wave" setting. `data_version` (git-hash-style) models
+   recalibration reruns. The generator draws it once for each `(shot, stage)` and applies it to
+   the whole diagnostic group.
+2. **`ingest.py`** writes one raw Parquet file for each `(wave, data_version)` to
+   `data/raw/experiment=.../shot=.../stage=.../`. It registers the files with one batched
+   `ducklake_add_data_files` call for each `(shot, stage)`. By default, it then calls
+   `compact.py` and `manifest.py` immediately after that group registers. Each diagnostic group
+   is queryable when its own ingestion ends. It does not wait for other stages. `--no-compact`
+   skips this step. `--stage` limits one call to one diagnostic group. Without `--stage`, the
+   call compacts the whole shot again. Use that only for periodic maintenance, not for normal
+   ingest.
+3. **`compact.py`** is the core part that enforces the invariants. It groups the sorted row
+   stream again into complete `(stage, wave, data_version)` chunks (`_iter_wave_groups`). This
+   does not depend on batch boundaries. Then it does these steps:
+   - It gives an oversized wave its own dedicated, contiguous row groups. It never mixes them
+     with the rows of another wave, not even in part.
+   - It packs small channel-versions together only in the same `(stage, data_version)`.
+   - It treats `stage` and `data_version` as hard partition boundaries at **both** the row-group
+     level and the **file** level. A file rollover happens between complete waves, never in the
+     middle of a wave. One oversized wave always lands in exactly one file, also when it is
+     larger than `--target-file-size-bytes` ("one wave, one file"). This lets the HTTP API
+     combine row groups into one redirect safely.
+
+   The compactor writes a file under a temporary name. When it closes the file, it knows if the
+   file has one wave or packed waves. Then it renames the file to
+   `<wave-or-"multi">__<data_version>__<hash>.parquet`.
+4. **`manifest.py`** reads the Parquet footer directly (`parquet_metadata()`, not through
+   DuckLake). It takes the `x_min` and `x_max` of each row group and the byte offsets. It parses
+   `experiment`, `shot` and `stage` from the hive-style **path** (not from columns, see below).
+   Then it writes the rows into the `wave_manifest` Postgres table.
+5. **`fetch_wave.py`** and **`api_server.py`** find the matching row groups in `wave_manifest`
+   and fetch only those bytes. The function `plan_response()` in `api_server.py` is a pure
+   function (tested in `test_api_server_logic.py`). It combines contiguous row groups into one
+   redirect when this is safe. It returns `300 Multiple Choices` when the matches are in more
+   than one file, or when `row_group_id` has a gap. A gap means that the bytes between the row
+   groups belong to a row group of a *different* wave. This is a correctness guard, not only an
+   optimization.
 
 ### Queue-driven ingest (`ingest_queue.py`, `ingest_worker.py`)
 
-The alternative to step 2's in-process register+compact, built on one invariant: a
-`(stage, data_version)` is ingested exactly once and is immutable. Producers
-(`ducklake-ingest --enqueue`) compact each version locally (`ingest.compact_stage_locally`: plain
-DuckDB + `stream_compact_to_files`) straight into final files under `data/lake/`, then enqueue
-**one row per version** (`file_paths TEXT[]`, `UNIQUE (experiment, shot, stage, data_version)`).
-A single `ducklake-ingest-worker` (Postgres advisory lock; extra instances are hot standbys)
-registers each version's files in one DuckLake transaction, then inserts their `wave_manifest`
-rows and marks the version completed in one Postgres transaction. There is no compaction and
-no manifest refresh on this path, since files are never rewritten. Key invariants, explained in
-full in the README's "Queue-driven ingest" section:
-- The DuckLake commit and the queue update can't be one transaction (DuckLake commits through its
-  own Postgres session). Before registering, the worker checks which versions' files are already
-  *active* in `ducklake_data_file`. That check is what keeps crash recovery from
-  double-registering, so don't remove it.
-- Manifest rows are written only after DuckLake registration, together with completion, so the
-  HTTP path never serves a version SQL can't see.
-- Files wait unregistered in DuckLake's `DATA_PATH` until the worker gets to them, so
-  `ducklake_delete_orphaned_files` needs an `older_than` above the queue lag.
+This path is the alternative to the in-process register and compact of step 2. It depends on one
+invariant: the pipeline ingests a `(stage, data_version)` exactly once, and it never changes.
 
-### Physical layout: why `experiment`/`shot`/`stage` are hive path segments, not columns
+- **Producers** (`ducklake-ingest --enqueue`) compact each version locally
+  (`ingest.compact_stage_locally`: plain DuckDB and `stream_compact_to_files`). They write
+  straight to final files in `data/lake/`. Then they enqueue **one row for each version**
+  (`file_paths TEXT[]`, `UNIQUE (experiment, shot, stage, data_version)`).
+- **The worker** is one `ducklake-ingest-worker` (Postgres advisory lock; extra instances are
+  hot standbys). It registers the files of a version in one DuckLake transaction. Then it
+  inserts their `wave_manifest` rows and marks the version completed in one Postgres
+  transaction.
+- This path does not compact again and does not refresh the manifest, because it never rewrites
+  files.
 
-`experiment`/`shot`/`stage` exist only in the directory path
-(`experiment=X/shot=Y/stage=Z/<file>.parquet`), never as physical columns inside the Parquet
-files — `wave`/`data_version`/`x`/`y` are the only physical columns (`compact.py`'s
-`PHYSICAL_COLUMNS`). This is required, not a style choice: `ducklake_add_data_files` fails with
-"invalid partition value for the table configuration" if a `PARTITIONED BY` column is *also*
-present in the file's own data (see `README.md`'s "Physical layout & partitioning" section for
-the upstream DuckLake issue this matches). Through the DuckLake table or
-`read_parquet(..., hive_partitioning=true)`, these three still behave like ordinary columns when
-queried. nginx has a rewrite rule (`nginx/nginx.conf`) that translates clean URLs
-(`.../lake/<experiment>/<shot>/<stage>/<file>`) to the real `key=value` path before serving,
-including through the `/range-proxy/` loopback.
+The README section "Queue-driven ingest" explains the key invariants in full:
+- The DuckLake commit and the queue update cannot be one transaction (DuckLake commits through
+  its own Postgres session). Before the worker registers files, it checks which files of the
+  versions are already *active* in `ducklake_data_file`. This check prevents a double
+  registration after a crash. Do not remove it.
+- The worker writes the manifest rows only after the DuckLake registration, together with the
+  completion. Because of this, the HTTP path never serves a version that SQL cannot see.
+- Files stay unregistered in the DuckLake `DATA_PATH` until the worker registers them. For this
+  reason, `ducklake_delete_orphaned_files` needs an `older_than` value above the queue lag.
 
-`compact.py`'s own boundary logic — not DuckLake's `PARTITIONED BY` or
-`ducklake_merge_adjacent_files` — is what actually guarantees a file never mixes stages or
-data_versions; that guarantee was deliberately not delegated to DuckLake's built-in partitioning
-machinery, since no documentation confirms `merge_adjacent_files` respects partition boundaries.
+### Physical layout: why `experiment`, `shot` and `stage` are hive path segments, not columns
+
+`experiment`, `shot` and `stage` exist only in the directory path
+(`experiment=X/shot=Y/stage=Z/<file>.parquet`). They are never physical columns in the Parquet
+files. `wave`, `data_version`, `x` and `y` are the only physical columns (`PHYSICAL_COLUMNS` in
+`compact.py`). This is a requirement, not a style choice. `ducklake_add_data_files` fails with
+"invalid partition value for the table configuration" if a `PARTITIONED BY` column is *also* in
+the data of the file. The README section "Schema" gives the upstream DuckLake issue. In queries,
+these three columns behave like ordinary columns. This is true through the DuckLake table and
+through `read_parquet(..., hive_partitioning=true)`. nginx has a rewrite rule
+(`nginx/nginx.conf`). It translates clean URLs (`.../lake/<experiment>/<shot>/<stage>/<file>`)
+to the real `key=value` path before it serves the file. This includes the `/range-proxy/`
+loopback.
+
+The boundary logic of `compact.py` guarantees that a file never mixes stages or data_versions.
+The `PARTITIONED BY` setting of DuckLake and `ducklake_merge_adjacent_files` do not guarantee
+this. The design does not use the partitioning machinery of DuckLake for this guarantee on
+purpose. No documentation confirms that `merge_adjacent_files` respects partition boundaries.
 
 ### HTTP fetch path
 
@@ -171,48 +182,56 @@ client -> GET that Location        (nginx, :8080)
        <- 206 Partial Content
 ```
 
-nginx's `/range-proxy/` location proxies back to its own `/data/` location, injecting a `Range`
-header built from the `?r=` query arg (not whatever `Range` header the real client sent) — this
-is how the server tells nginx which bytes to serve on the client's *first* request, before the
-client could possibly know byte offsets itself. The bytes returned are a raw row-group fragment,
-not a standalone valid `.parquet` file (no footer); see `fetch_wave.py`'s docstring for the
-validated-read alternative when a consumer needs a spec-compliant read.
+The nginx `/range-proxy/` location proxies to the nginx `/data/` location of the same server. It
+adds a `Range` header that it builds from the `?r=` query argument. It does not use the `Range`
+header that the real client sent. With this method, the server tells nginx which bytes to serve
+on the *first* request of the client. At that time, the client cannot know the byte offsets. The
+returned bytes are a raw row-group fragment. They are not a standalone valid `.parquet` file (no
+footer). If a consumer needs a read that follows the specification, see the docstring of
+`fetch_wave.py` for the validated-read alternative.
 
 ### Column encoding policy (`parquet_encoding.py`)
 
-Shared by both raw ingestion and compaction, not left to Parquet defaults: dictionary encoding
-for `wave`/`data_version` (low cardinality, repeats a lot), `BYTE_STREAM_SPLIT` for the `x`/`y`
-float64 columns (byte-plane separation compresses smoothly-varying signal data much better than
-interleaved doubles), ZSTD level 2 (chosen for write-side CPU cost during continuous ingestion,
-not maximum ratio). Dictionary encoding and `BYTE_STREAM_SPLIT` are mutually exclusive per Parquet
-column, so the module asserts the two lists never overlap.
+Raw ingestion and compaction share this policy. It does not use the Parquet defaults.
+- Dictionary encoding for `wave` and `data_version` (few distinct values, repeated often).
+- `BYTE_STREAM_SPLIT` for the float64 columns `x` and `y`. The separation of byte planes
+  compresses smooth signal data much better than interleaved doubles.
+- ZSTD level 2. This level is selected for low CPU cost on the write side during continuous
+  ingestion. It is not selected for the highest ratio.
+
+In Parquet, dictionary encoding and `BYTE_STREAM_SPLIT` exclude each other for one column. The
+module asserts that the two lists never overlap.
 
 ## Querying the lake
 
-Any query against `waves`, `wave_manifest`, or the fetch path (SQL files, notebooks, Python,
-ad hoc) must follow the guidelines below. They're written for the production scale target
-(~10^12 rows, ~3,000 waves/shot across ~40 stages), where unfiltered or version-mixing queries
-are either wrong or never finish.
+Each query on `waves`, `wave_manifest`, or the fetch path must follow the guidelines below. This
+applies to SQL files, notebooks, Python and ad hoc queries. The guidelines are for the
+production scale target (about 10^12 rows, about 3,000 waves for each shot in about 40 stages).
+At this scale, queries without filters, and queries that mix versions, are wrong or do not
+finish.
 
 @QUERYING.md
 
 ## Test tiers
 
-- **Unit** (`test_synthetic.py`, `test_parquet_encoding.py`, `test_compact.py`, `test_manifest.py`,
-  `test_fetch_wave.py`): DuckDB + local filesystem only, no services required.
+- **Unit** (`test_synthetic.py`, `test_parquet_encoding.py`, `test_compact.py`,
+  `test_manifest.py`, `test_fetch_wave.py`): DuckDB and the local filesystem only. No services
+  are necessary.
 - **Integration** (`test_range_http_file.py`, `test_local_demo_integration.py`,
   `test_api_server.py`, `test_reset.py`, most of `test_ingest_queue.py`; marked
-  `@pytest.mark.integration`): need a reachable Postgres and/or nginx. `conftest.py` probes for both and `pytest.skip`s cleanly if unreachable,
-  so `uv run pytest` passes on a machine without `docker compose up`.
+  `@pytest.mark.integration`): these tests need a reachable Postgres or nginx, or both.
+  `conftest.py` probes for both. It calls `pytest.skip` if they are not reachable. Because of
+  this, `uv run pytest` passes on a machine without `docker compose up`.
 
-## Known gaps (see README's "What's not verified" section)
+## Known gaps (see the README section "What is not verified")
 
-- The actual `ducklake_add_data_files` call against a real attached DuckLake catalog has not
-  been re-confirmed after the hive-partitioning fix (no `extensions.duckdb.org` access in the
-  environment this was built in).
-- `manifest.py` stores `file_path` as an **absolute path from whichever machine ran compaction**;
-  the dockerized `api` service could fail resolving it if its filesystem layout differs from
-  wherever compaction ran. Not yet switched to storing paths relative to `LAKE_DATA_DIR`.
-- The `/range-proxy/` nginx location is deliberately not `internal`, so byte ranges are
-  effectively guessable/public — acceptable for this POC's non-sensitive data, not for anything
-  access-controlled without adding e.g. a signed query string.
+- The real `ducklake_add_data_files` call on an attached DuckLake catalog is not confirmed again
+  after the hive-partitioning fix. The environment of the build had no access to
+  `extensions.duckdb.org`.
+- `manifest.py` stores `file_path` as an **absolute path from the machine that ran the
+  compaction**. The dockerized `api` service can fail to resolve it if its filesystem layout is
+  different. The manifest does not yet store paths relative to `LAKE_DATA_DIR`.
+- The `/range-proxy/` nginx location is not `internal`, on purpose. Because of this, anyone can
+  guess the byte ranges. This is acceptable for the non-sensitive data of this POC. It is not
+  acceptable for data with access control, unless you add a control such as a signed query
+  string.
