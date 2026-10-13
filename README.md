@@ -74,9 +74,70 @@ cd src && uv sync
 uv run ducklake-reset --yes    # always run this after you clear or regenerate data/ alone
 ```
 
+`ducklake-reset` leaves the catalog empty. This is correct. The tables do not exist until the
+first ingest creates them:
+
+| Table | Created by | When |
+|---|---|---|
+| `waves` (DuckLake table, with `SET SORTED BY` and `PARTITIONED BY`) | `ingest.ensure_table()` | First `ducklake-ingest` run on the direct path (no `--enqueue`), or the first registration by `ducklake-ingest-worker` |
+| `ducklake_*` metadata tables | DuckLake `ATTACH` in `config.get_connection()` | First connection |
+| `wave_manifest` | `manifest.py` (`CREATE TABLE IF NOT EXISTS`) | First manifest write |
+| `ingest_queue` | `ingest_queue.ensure_queue_table()` | First `--enqueue` run |
+
+`ducklake-ingest --enqueue` does not touch DuckLake. It only writes files and queue rows. The
+worker creates `waves` when it registers the first version.
+
+### Generate and load synthetic data
+
+```bash
+docker compose up -d
+cd src
+uv run ducklake-reset --yes                  # optional: clean start
+uv run ducklake-ingest --shots 3             # shots 1..3, all stages
+uv run ducklake-ingest --shot 1 --stage mirnov   # or one stage only (faster)
+```
+
+For each `(shot, stage)`, the command generates synthetic waves (`synthetic.py`), writes raw
+Parquet to `data/raw/`, registers the files in DuckLake, compacts them into `data/lake/`, and
+writes the `wave_manifest` rows. The queue path gives the same result:
+
+```bash
+uv run ducklake-ingest --shots 3 --enqueue
+uv run ducklake-ingest-worker --once
+```
+
+### Use the data in the marimo notebook
+
+Run `uv sync --extra notebooks`. The notebook has two modes:
+
+- **Without `LAKE_CATALOG`:** The notebook builds its own synthetic lake (shots 1-12, all
+  stages) with the same `synthetic.py` code. It puts the lake in `$TMPDIR/ducklake_marimo_demo`.
+  It needs no Postgres and no ingest.
+- **With `LAKE_CATALOG`:** The notebook reads the data that you ingested above. Ingest first.
+  If the catalog is empty, the queries return no rows.
+
+```bash
+cd src
+LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" \
+    uv run marimo edit --watch ../notebooks/querying_the_lake.py
+```
+
+The second notebook, `notebooks/spectrometer_impurities.py`, is a use case: it finds how the
+spectrometer impurity lines change across shots, and which other stages and waves correlate with
+them. It uses the same two modes and the same `LAKE_CATALOG` variable. Both notebooks share one
+demo lake. `src/ducklake_poc/notebook_lake.py` has the shared setup.
+
+On a real catalog, a `(shot, stage)` can have several `data_version`s, and the direct ingest
+path stores no timestamp for them. `notebook_lake.py` then pins the **first version by name**
+and shows a warning with the pinned versions. This is a demo shortcut. Set
+`LAKE_VERSION_POLICY=error` to make the notebook refuse instead. A version recorded by
+`--enqueue` (`ingest_queue.processed_at`) always pins the newest one.
+
+The notebook uses `LAKE_EXPERIMENT` (default: the `ducklake-ingest` default experiment). Set it
+if you ingest with `--experiment`.
+
 `CLAUDE.md` has the full command reference (ingest, compact, manifest, fetch, api, test tiers,
-and editor type-checking setup). To run the marimo slide deck, run
-`uv sync --extra notebooks`. Then run `uv run marimo run ../notebooks/querying_the_lake.py`.
+and editor type-checking setup).
 
 ## Pipeline: ingest -> compact -> manifest -> fetch
 

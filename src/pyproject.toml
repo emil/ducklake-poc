@@ -21,6 +21,7 @@ notebooks = [
     "pandas>=2.0.0",
     "matplotlib>=3.8.0",
     "marimo>=0.9",
+    "altair>=5.4",
 ]
 
 [project.scripts]

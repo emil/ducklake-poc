@@ -93,8 +93,10 @@ DIAGNOSTICS: dict[str, list[str]] = {
     "thomson": ["thomson_te/A", "thomson_te/B", "thomson_ne/A", "thomson_ne/B"],
     "tip": ["tip/density_ch1", "tip/faraday_ch1"],
     "ece": [f"ece/ch{i:02d}" for i in range(1, 9)],
+    "spectrometer": [f"spectrometer/line_{n}" for n in ("Halpha", "CIII", "OII", "Dgamma")],
     # Radiation & particle sensors
     "bolometer": [f"bolometer/array_{i:02d}" for i in range(1, 9)],
+    "axuv": [f"axuv/diode_{i:02d}" for i in range(1, 9)],
     "cxrs": ["cxrs/channel_1", "cxrs/channel_2"],
     # Machine protection & exhaust
     "langmuir_probe": [f"langmuir_probe/probe_{i}" for i in range(1, 5)],
@@ -113,7 +115,9 @@ STAGE_PROFILE: dict[str, tuple[float, float, float]] = {
     "thomson": (1.0, 0.0, 0.0),
     "tip": (40.0, 0.0, 0.0),
     "ece": (30.0, 0.0, 0.0),
+    "spectrometer": (2.0, 0.0, 0.0),  # line-intensity monitor, about 2 kHz
     "bolometer": (20.0, 0.0, 0.0),
+    "axuv": (250.0, 0.0, 0.0),  # fast photodiode array, about 250 kHz
     "cxrs": (8.0, 0.0, 0.0),
     "langmuir_probe": (24.0, 0.0, 0.0),
 }

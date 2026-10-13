@@ -24,6 +24,9 @@ uv sync --dev                     # + pytest, ruff, basedpyright, pyinstrument
 uv sync --extra notebooks         # + jupyter, jupysql, marimo (notebooks/)
 
 uv run marimo run ../notebooks/querying_the_lake.py    # slide deck: querying and plotting (--edit to edit)
+uv run marimo run ../notebooks/spectrometer_impurities.py   # use case: impurity lines across shots, correlated with other stages
+uv run marimo edit --watch ../notebooks/querying_the_lake.py   # watch mode: reloads when Claude Code edits the file
+                                                              # (see notebooks/CLAUDE.md for the Claude workflow)
 LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" \
     uv run marimo run ../notebooks/querying_the_lake.py  # same deck on the real catalog (default: local demo lake)
 uv run ruff check .               # lint
@@ -215,7 +218,7 @@ finish.
 ## Test tiers
 
 - **Unit** (`test_synthetic.py`, `test_parquet_encoding.py`, `test_compact.py`,
-  `test_manifest.py`, `test_fetch_wave.py`): DuckDB and the local filesystem only. No services
+  `test_manifest.py`, `test_fetch_wave.py`, `test_notebook_lake.py`, `test_correlation.py`): DuckDB and the local filesystem only. No services
   are necessary.
 - **Integration** (`test_range_http_file.py`, `test_local_demo_integration.py`,
   `test_api_server.py`, `test_reset.py`, most of `test_ingest_queue.py`; marked
