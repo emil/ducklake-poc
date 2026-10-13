@@ -580,8 +580,16 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
+def _(lake, mo):
+    # The demo lake has a DuckDB connection. The real catalog does not.
+    _footnote = (
+        "*To use the real catalog:*\n    "
+        '`LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" '
+        "marimo run notebooks/spectrometer_impurities.py`"
+        if lake.connection is not None
+        else ""
+    )
+    mo.md(f"""
     ## Limits of this analysis
 
     - **Demo data is synthetic.** The generator makes each wave independently. In the demo
@@ -598,8 +606,7 @@ def _(mo):
     - **High-rate stages cost more.** `mirnov` has about 2 M samples in each wave. Leave it off,
       or narrow the shot range and the time window first.
 
-    *To use the real catalog:*
-    `LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" marimo run notebooks/spectrometer_impurities.py`
+    {_footnote}
     """)
     return
 

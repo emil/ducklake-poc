@@ -183,6 +183,7 @@ def _(mo, os, pd, time):
         STAGES,
         all_versions,
         config,
+        lake,
         list_waves,
         pin,
         pinned,
@@ -1526,8 +1527,16 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(mo):
-    mo.md(r"""
+def _(lake, mo):
+    # The demo lake has a DuckDB connection. The real catalog does not.
+    _footnote = (
+        "*To run this notebook on a real catalog:*\n    "
+        '`LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" '
+        "marimo run notebooks/querying_the_lake.py`"
+        if lake.connection is not None
+        else ""
+    )
+    mo.md(f"""
     ## Summary
 
     1. **Select the access path.** Metadata: Postgres. One wave: HTTP. Analysis: SQL.
@@ -1538,8 +1547,7 @@ def _(mo):
 
     Full rules: `QUERYING.md`. Design background: `README.md`.
 
-    *To run this notebook on a real catalog:*
-    `LAKE_CATALOG="postgres:dbname=ducklake_catalog host=localhost user=ducklake" marimo run notebooks/querying_the_lake.py`
+    {_footnote}
     """)
     return
 
