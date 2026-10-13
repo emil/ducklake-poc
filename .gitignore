@@ -6,3 +6,6 @@ data/lake/*
 !data/raw/.gitkeep
 !data/lake/.gitkeep
 *.rowgroup.bin
+
+# marimo cache
+notebooks/__marimo__/
