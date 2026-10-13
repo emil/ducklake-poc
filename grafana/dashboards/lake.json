@@ -1,0 +1,653 @@
+{
+  "uid": "ducklake-lake",
+  "title": "Lake and ingest queue",
+  "tags": [
+    "ducklake"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "panels": [
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Rows (samples) in waves",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT coalesce(sum(record_count), 0) AS rows FROM ducklake_data_file WHERE end_snapshot IS NULL AND table_id IN (SELECT table_id FROM ducklake_table WHERE table_name = 'waves' AND end_snapshot IS NULL)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      },
+      "description": "Active DuckLake data files of the waves table, from the catalog. All data_versions are included. No Parquet is read."
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Waves (own row groups)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(DISTINCT (experiment, shot, stage, wave_min, data_version)) AS waves FROM wave_manifest WHERE wave_min = wave_max"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      },
+      "description": "Waves with dedicated row groups. Small waves that compaction packs together are not counted here."
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Active files",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS files FROM ducklake_data_file WHERE end_snapshot IS NULL AND table_id IN (SELECT table_id FROM ducklake_table WHERE table_name = 'waves' AND end_snapshot IS NULL)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Lake size",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT coalesce(sum(file_size_bytes), 0) AS bytes FROM ducklake_data_file WHERE end_snapshot IS NULL AND table_id IN (SELECT table_id FROM ducklake_table WHERE table_name = 'waves' AND end_snapshot IS NULL)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Shots",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(DISTINCT (experiment, shot)) AS shots FROM wave_manifest"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 16,
+      "type": "barchart",
+      "title": "Rows by stage (manifest)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT stage, sum(row_group_rows) AS rows FROM wave_manifest GROUP BY stage ORDER BY rows DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "xTickLabelRotation": -45,
+        "legend": {
+          "showLegend": false
+        }
+      },
+      "description": "Sum of row_group_rows in wave_manifest. All data_versions are included."
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "Rows by shot",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT experiment, shot, count(DISTINCT stage) AS stages, count(DISTINCT data_version) AS versions, sum(row_group_rows) AS rows FROM wave_manifest GROUP BY experiment, shot ORDER BY experiment, shot DESC LIMIT 50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Pending",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS pending FROM ingest_queue WHERE status = 'pending'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Processing",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 13,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS processing FROM ingest_queue WHERE status = 'processing'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Completed",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS completed FROM ingest_queue WHERE status = 'completed'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Failed",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS failed FROM ingest_queue WHERE status = 'failed'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "Oldest pending",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT coalesce(extract(epoch FROM now() - min(created_at)), 0) AS age FROM ingest_queue WHERE status = 'pending'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      },
+      "description": "Age of the oldest version that waits for the worker. A growing value means that the worker is stopped or too slow."
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Files waiting",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 13,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT coalesce(sum(cardinality(file_paths)), 0) AS files FROM ingest_queue WHERE status IN ('pending', 'processing')"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value"
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Queue throughput (per 5 min)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT time, sum(enqueued) AS enqueued, sum(completed) AS completed FROM (SELECT $__timeGroup(created_at, '5m') AS time, count(*) AS enqueued, 0 AS completed FROM ingest_queue WHERE $__timeFilter(created_at) GROUP BY 1 UNION ALL SELECT $__timeGroup(processed_at, '5m') AS time, 0, count(*) FROM ingest_queue WHERE status = 'completed' AND $__timeFilter(processed_at) GROUP BY 1) t GROUP BY time ORDER BY time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Versions enqueued and completed in the time range. The queue keeps no depth history, so this shows throughput."
+    },
+    {
+      "id": 25,
+      "type": "table",
+      "title": "Failed and retried versions",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "ducklake-catalog"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "ducklake-catalog"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT id, experiment, shot, stage, data_version, status, attempts, left(last_error, 160) AS last_error, created_at FROM ingest_queue WHERE status = 'failed' OR attempts > 1 ORDER BY id DESC LIMIT 20"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

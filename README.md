@@ -347,6 +347,49 @@ The module docstring has examples. The nginx locations `/lake-index/`, `/ingest-
 Measured on the `local_demo.py` dataset: 61.2 MB with the plain ZSTD defaults, and 29.7 MB with
 this policy. Most of the gain comes from `BYTE_STREAM_SPLIT` on `x` and `y`.
 
+## Operations: backup and monitoring
+
+### Catalog backup (`scripts/backup_catalog.sh`)
+
+```bash
+BACKUP_DIR=/var/backups/ducklake scripts/backup_catalog.sh
+# -> /var/backups/ducklake/ducklake_catalog_20261012T101500Z.tgz
+```
+
+The script runs `pg_dump` (plain SQL, `--clean --if-exists --no-owner`) and compresses the dump
+into `<database>_<UTC timestamp>.tgz`. `BACKUP_DIR` is required. The script uses the same
+`PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER` and `PG_PASSWORD` variables as `config.py`. If
+`pg_dump` is not on the `PATH`, it runs `pg_dump` inside the `ducklake_postgres` container.
+
+The backup holds the catalog only: the DuckLake metadata, `wave_manifest` and `ingest_queue`. It
+does not hold the Parquet files in `data/lake/`. Back up that directory with the catalog. A
+catalog that you restore without its files points to files that do not exist.
+
+To restore, stop `ducklake-ingest-worker` and `ducklake-api`. Then run
+`tar -xzOf <archive>.tgz | psql -h localhost -U ducklake -d ducklake_catalog`.
+
+### Grafana (`docker compose up -d grafana`)
+
+Grafana runs on <http://localhost:3000> (user `admin`, password `GRAFANA_ADMIN_PASSWORD`,
+default `admin`). It uses the built-in PostgreSQL data source, so it needs no plugin. The
+provisioning files in `grafana/provisioning/` create the data source and load the dashboards in
+`grafana/dashboards/`.
+
+| Dashboard | Content |
+|---|---|
+| Postgres | database size, connections (by state), cache hit ratio, deadlocks, long-running queries, largest tables, database counters |
+| Lake and ingest queue | rows in `waves`, number of waves, files, size, rows by stage and by shot, queue depth by status, age of the oldest pending version, queue throughput, failed versions |
+
+Limits:
+- The panels query Postgres directly. They show the current state. Counters such as commits and
+  rollbacks are cumulative since the last stats reset. For graphs of Postgres metrics over
+  time, add `postgres_exporter` and Prometheus.
+- The row count comes from the catalog (`ducklake_data_file`). The wave count comes from
+  `wave_manifest`. Waves that compaction packs together are not in it. No panel reads Parquet.
+- The queue panels show an error until the first `ducklake-ingest --enqueue` run creates
+  `ingest_queue`. The lake panels show an error until the first ingest creates the catalog tables.
+- Grafana connects as the `ducklake` user. Use a read-only role outside of this POC.
+
 ## What is *not* verified in this environment
 
 - The environment had no access to `extensions.duckdb.org`. Because of this, `INSTALL ducklake`

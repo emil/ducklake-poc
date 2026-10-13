@@ -47,6 +47,8 @@ uv run ducklake-manifest data/lake/experiment=.../shot=.../stage=.../<file>.parq
 uv run ducklake-fetch-wave --experiment campaign-2026a --shot 1 --stage mirnov \
     --wave mirnov/probe_03 --data-version a1b2c3d --x-min 250 --x-max 251
 uv run ducklake-api               # Flask API on :5001, redirects into the nginx range-proxy
+BACKUP_DIR=/path/to/backups scripts/backup_catalog.sh   # pg_dump of the catalog -> <db>_<timestamp>.tgz
+docker compose up -d grafana      # Grafana on :3000 (admin / $GRAFANA_ADMIN_PASSWORD, default admin): Postgres + lake dashboards
 ```
 
 To run one pytest test, use `uv run pytest tests/test_foo.py::test_name`, or filter with `-k`.

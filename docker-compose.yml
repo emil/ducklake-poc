@@ -52,5 +52,27 @@ services:
       - postgres
       - nginx
 
+  grafana:
+    image: grafana/grafana:12.0.2
+    container_name: ducklake_grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Used by grafana/provisioning/datasources/postgres.yml
+      PG_DB: ducklake_catalog
+      PG_USER: ducklake
+      PG_PASSWORD: ducklake
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  grafana-data:
