@@ -771,6 +771,81 @@ def _(
 
 
 @app.cell(hide_code=True)
+def _(
+    EXPERIMENT,
+    ZOOM_X0,
+    ZOOM_X1,
+    alt,
+    buckets_ui,
+    config,
+    mo,
+    shot_ui,
+    sql_block,
+    stage_ui,
+    timed_q,
+    version_ui,
+    wave_ui,
+):
+    SLOPE_SQL = f"""SELECT
+        floor(x / ?) * ? AS x_bucket,
+        avg(y) AS y_mean,
+        regr_slope(y, x) AS slope
+    FROM {config.TABLE_NAME}
+    WHERE experiment = ? AND shot = ? AND stage = ? AND data_version = ? AND wave = ?
+      AND x >= ? AND x < ?
+    GROUP BY x_bucket
+    ORDER BY x_bucket"""
+    _width = (ZOOM_X1 - ZOOM_X0) / buckets_ui.value
+    _df, _seconds = timed_q(
+        SLOPE_SQL,
+        [
+            _width,
+            _width,
+            EXPERIMENT,
+            shot_ui.value,
+            stage_ui.value,
+            version_ui.value,
+            wave_ui.value,
+            ZOOM_X0,
+            ZOOM_X1,
+        ],
+    )
+    _x = alt.X("x_bucket:Q", title="x (ms)", scale=alt.Scale(domain=[ZOOM_X0, ZOOM_X1]))
+    _signal = (
+        alt.Chart(_df)
+        .mark_line()
+        .encode(x=_x, y=alt.Y("y_mean:Q", title="y (mean of bucket)"))
+        .properties(width="container", height=110)
+    )
+    _slope = (
+        alt.Chart(_df)
+        .mark_line(color="#d62728")
+        .encode(
+            x=_x,
+            y=alt.Y("slope:Q", title="dy/dx (y per ms)"),
+            tooltip=["x_bucket", "y_mean", "slope"],
+        )
+        .properties(width="container", height=110)
+    )
+    mo.vstack(
+        [
+            mo.md(
+                "## Rate of change: the slope of y\n\n"
+                "`regr_slope(y, x)` fits a line through the samples of each bucket. "
+                "The result is **dy/dx** in y per ms. Edges and ramps are peaks in the slope. "
+                "Do not use `lead(y) - y` for each sample: it amplifies noise.\n\n"
+                f"*`{wave_ui.value}` · window {ZOOM_X0:.1f} to {ZOOM_X1:.1f} ms · "
+                f"{_seconds * 1000:.0f} ms.*"
+            ),
+            _signal,
+            _slope,
+            sql_block(SLOPE_SQL),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
     ## Across shots: start with ONE range query
