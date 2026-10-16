@@ -822,7 +822,7 @@ def _(
         .mark_line(color="#d62728")
         .encode(
             x=_x,
-            y=alt.Y("slope:Q", title="dy/dx (y per ms)"),
+            y=alt.Y("slope:Q", title="dy/dt (y per ms)"),
             tooltip=["x_bucket", "y_mean", "slope"],
         )
         .properties(width="container", height=110)
@@ -830,10 +830,13 @@ def _(
     mo.vstack(
         [
             mo.md(
-                "## Rate of change: the slope of y\n\n"
+                "## Rate of change: dy/dt of the signal\n\n"
                 "`regr_slope(y, x)` fits a line through the samples of each bucket. "
-                "The result is **dy/dx** in y per ms. Edges and ramps are peaks in the slope. "
-                "Do not use `lead(y) - y` for each sample: it amplifies noise.\n\n"
+                "The result is the **temporal derivative dy/dt** in y per ms, because `x` is time. "
+                "It is not a spatial gradient: it is not the steepness of a density or "
+                "potential profile (dn/dr). Edges and ramps are peaks in the slope. "
+                "Do not use `lead(y) - y` for each sample: it amplifies noise. "
+                "A bucket with fewer than 2 samples gives no slope.\n\n"
                 f"*`{wave_ui.value}` · window {ZOOM_X0:.1f} to {ZOOM_X1:.1f} ms · "
                 f"{_seconds * 1000:.0f} ms.*"
             ),
