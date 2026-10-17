@@ -49,6 +49,7 @@ def _():
 def _(mo, os, pd, time):
     from ducklake_poc import config, ingest, synthetic
     from ducklake_poc.notebook_lake import DEFAULT_DEMO_ROOT, open_lake
+    from ducklake_poc.profile_gradient import ECE_RADIUS_M, profile_gradient
 
     # The shared setup is in `ducklake_poc.notebook_lake`. Without LAKE_CATALOG it builds a
     # synthetic demo lake with the production generator and compactor.
@@ -176,6 +177,7 @@ def _(mo, os, pd, time):
 
     return (
         DURATION,
+        ECE_RADIUS_M,
         EXPERIMENT,
         MODE,
         REDUCTIONS_DIR,
@@ -187,6 +189,7 @@ def _(mo, os, pd, time):
         list_waves,
         pin,
         pinned,
+        profile_gradient,
         q,
         row_group_funnel,
         sql_block,
@@ -843,6 +846,87 @@ def _(
             _signal,
             _slope,
             sql_block(SLOPE_SQL),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(DURATION, mo):
+    profile_t_ui = mo.ui.slider(
+        start=0, stop=DURATION, step=1, value=250, label="time (ms)", full_width=True
+    )
+    return (profile_t_ui,)
+
+
+@app.cell(hide_code=True)
+def _(
+    DURATION,
+    ECE_RADIUS_M,
+    EXPERIMENT,
+    alt,
+    buckets_ui,
+    config,
+    mo,
+    pin,
+    pinned,
+    profile_gradient,
+    profile_t_ui,
+    shot_ui,
+    sql_block,
+    timed_q,
+):
+    _header = mo.md(
+        "## Profile gradient: dy/dR across channels\n\n"
+        "A profile gradient is a **spatial** derivative. It needs one position for each "
+        "channel. The lake stores no positions, so this slide uses an **assumed** radius "
+        "for each `ece` channel (`ECE_RADIUS_M`). Real values come from calibration metadata. "
+        "The query gets one mean value for each channel in a short time window. Python then "
+        "computes dy/dR across the channels."
+    )
+    mo.stop(
+        (shot_ui.value, "ece") not in pinned,
+        mo.vstack([_header, mo.md("This shot has no `ece` stage.")]),
+    )
+    PROFILE_SQL = f"""SELECT wave, avg(y) AS y_mean
+    FROM {config.TABLE_NAME}
+    WHERE experiment = ? AND shot = ? AND stage = 'ece' AND data_version = ?
+      AND wave IN ({", ".join("?" * len(ECE_RADIUS_M))})
+      AND x >= ? AND x < ?
+    GROUP BY wave"""
+    _t0 = float(profile_t_ui.value)
+    _t1 = _t0 + DURATION / buckets_ui.value
+    _df, _seconds = timed_q(
+        PROFILE_SQL,
+        [EXPERIMENT, shot_ui.value, pin(shot_ui.value, "ece"), *ECE_RADIUS_M, _t0, _t1],
+    )
+    _prof = profile_gradient(_df, ECE_RADIUS_M)
+    _x = alt.X("r_m:Q", title="R (m, assumed)", scale=alt.Scale(zero=False))
+    _tip = ["wave", "r_m", "y_mean", "grad"]
+    _value = (
+        alt.Chart(_prof)
+        .mark_line(point=True)
+        .encode(x=_x, y=alt.Y("y_mean:Q", title="y (mean in window)"), tooltip=_tip)
+        .properties(width="container", height=110)
+    )
+    _grad = (
+        alt.Chart(_prof)
+        .mark_line(color="#d62728", point=True)
+        .encode(x=_x, y=alt.Y("grad:Q", title="dy/dR (y per m)"), tooltip=_tip)
+        .properties(width="container", height=110)
+    )
+    mo.vstack(
+        [
+            _header,
+            profile_t_ui,
+            mo.md(
+                f"*Shot {shot_ui.value} · `ece` · window {_t0:.1f} to {_t1:.1f} ms · "
+                f"{len(_prof)} channels · {_seconds * 1000:.0f} ms. The synthetic channels are "
+                "independent sine waves, so the shape of the profile has no physical meaning.*"
+            ),
+            _value,
+            _grad,
+            sql_block(PROFILE_SQL),
         ]
     )
     return
